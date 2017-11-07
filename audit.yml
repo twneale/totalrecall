@@ -1,0 +1,15 @@
+version: '3'
+networks:
+  totalrecall:
+    external: true
+
+services:
+  audit:
+    build: ./docker/audit-parser
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        tag: "auditlogs-{{.ID}}"
+
+
