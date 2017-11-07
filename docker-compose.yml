@@ -12,23 +12,20 @@ services:
       - "24224:24224"
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:${ES_TAG}
-    environment:
-      - 'http.host=0.0.0.0'
-      - 'transport.host=127.0.0.1'
-      - 'ELASTIC_PASSWORD=${ELASTIC_PASSWORD}'
-      - 'disovery.type: single-node'
+    image: "elasticsearch:2"
+    restart: always
     ports: ['127.0.0.1:9200:9200']
     networks: ['totalrecall']
     volumes:
       - esdata:/usr/share/elasticsearch/data
 
   kibana:
-    image: docker.elastic.co/kibana/kibana:${ES_TAG}
-    environment: ['ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD}']
-    ports: ['127.0.0.1:5601:5601']
+    image: "kibana:4"
+    restart: always
     networks: ['totalrecall']
-    depends_on: ['elasticsearch']
+    ports: ['127.0.0.1:5601:5601']
+    environment:
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
 
 volumes:
   esdata:

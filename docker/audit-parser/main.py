@@ -3,12 +3,21 @@ import os
 import re
 import sys
 import json
+import time
 import shlex
+import datetime
 import collections
 
 import click
+from fluent import sender
 
 from lxml import etree
+
+#from elasticsearch import Elasticsearch
+#es = Elasticsearch()
+
+#res = es.index(index="test-index", doc_type='tweet', id=1, body=doc)
+#print(res['created'])
 
 
 class ExcludeArgv:
@@ -34,6 +43,7 @@ class ExcludeArgv:
 
 def parse_events(fp):
     for line in fp:
+        print('LINE: %s' % line)
         try:
             doc = etree.fromstring(line)
         except etree.XMLSyntaxError:
@@ -47,6 +57,10 @@ def parse_events(fp):
         data['attrs'] = dict(doc.xpath('//attribute')[0].attrib)
         data['subject'] = dict(doc.xpath('//subject')[0].attrib)
         data['return'] = dict(doc.xpath('//return')[0].attrib)
+        dt = datetime.datetime.strptime(data.pop('time'), '%a %b  %d %H:%M:%S %Y')
+        #data['@timestamp'] = str(time.mktime(dt.timetuple()))
+        #data['@timestamp'] = str(int(time.time()))
+        data['@timestamp'] = dt
         yield data
 
 
@@ -54,22 +68,20 @@ def parse_events(fp):
 @click.option('--exclude-patterns', '-x', type=click.Path(exists=True),
               help='Path to file containing exclude patterns.')
 def main(exclude_patterns):
-    #for line in sys.stdin:
+    logger = sender.FluentSender('audit')
     if exclude_patterns:
         with open(click.format_filename(exclude_patterns)) as f:
             exclude_argv = ExcludeArgv(f)
-    #with open('/tmp/cowaudit') as f:
     with sys.stdin as f:
         next(f)
         next(f)
         for event in parse_events(f):
-#            if 'rev-parse' in ' '.join(event['argv']):
-#                import rpdb; rpdb.set_trace()
             if event['argv'] in exclude_argv:
                 continue
             else:
-                sys.stdout.write(json.dumps(event))
-                sys.stdout.write('\n')
+                import pprint
+                pprint.pprint(event)
+                logger.emit('audit', event)
 
 
 
