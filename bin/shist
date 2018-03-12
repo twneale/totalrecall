@@ -30,7 +30,6 @@ def main(return_0, pwd):
 
     #import pprint
     #pprint.pprint(query)
-    import pdb; pdb.set_trace()
     results = es.search(index='totalrecall', body=query)
     #import pdb; pdb.set_trace()
 

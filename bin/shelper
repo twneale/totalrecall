@@ -5,8 +5,9 @@ import elasticsearch
 
 
 @click.command()
-@click.option('--cmd', '-c', help='Search term for command history.')
-def main(cmd):
+@click.argument('cmd', default=None)
+@click.option('--relevance', '-r', is_flag=True, help='Order by relevance instead of timestamp')
+def main(cmd, relevance):
     es = elasticsearch.Elasticsearch()
     query = {'query': {'match_all': {}}}
     query = {
@@ -24,9 +25,10 @@ def main(cmd):
         pred = predicates.get(key, 'should')
         query['query']['bool'][pred].append({'match': {'env.' + key: val}})
 
-    query['sort'] = { "start_timestamp": { "order": "desc" },
-                      "_score": {"order": "desc"}}
-    if cmd:
+    if not relevance:
+        query['sort'] = {"start_timestamp": {"order": "desc"},
+                         "_score": {"order": "desc"}}
+    if cmd is not None:
         query['query']['bool']['must'].append({'match': {'command': cmd}})
 
     #import pprint

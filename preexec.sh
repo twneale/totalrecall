@@ -8,7 +8,7 @@ function precmd () {
   ($TOTAL_RECALL_ROOT/totalrecall_sender.py \
       --command="$___PREEXEC_CMD" \
       --return-code="$?" \
-      --start-timestamp="$___PREEXEC_START_TIMESTAMP" --end-timestamp="$(date --iso-8601=ns)" &); 
+      --start-timestamp="$___PREEXEC_START_TIMESTAMP" --end-timestamp="$(date --iso-8601=ns)" > /dev/null 2>&1 &); 
   unset ___PREEXEC_CMD;
   unset ___PREEXEC_START_TIMESTAMP;
 }
