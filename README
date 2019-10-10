@@ -1,0 +1,31 @@
+Total Recall
+
+Dependencies
+##############
+
+- Python3 (with Click and Requests modules installed)
+- Docker
+
+Setup
+#########
+
+First bring up the docker-compose pod:
+  
+    $ docker-compose up -d
+
+Next source the bash-preexec guts (from https://github.com/rcaloras/bash-preexec), or add the Homebrew formula for bash preexec (haven't tested: https://formulae.brew.sh/formula/bash-preexec):
+
+    $ echo '[[ -f ~/c/totalrecall/.bash-preexec.sh ]] && source ~/c/totalrecall/.bash-preexec.sh' >> ~/.bashrc
+
+Then source the preexec.sh hooks in your ~/.bashrc. Assuming total recall folder is located at the path ~/c/totalrecall, then:
+
+    $ echo 'source ~/c/totalrecall/preexec.sh' >> ~/.bashrc
+
+After this, two things will happen: all bash commands will get asynchronously pushed into Elastichsearch, which will listening on localhost without authentication (!). So mind passwords and all that. Kibana will also be listening on localhost (as will Redis, used by the collector and ES loader scripts under ./src). Second, if this stack isn't up, every command will barf a Python traceback to standard out, which you can prevent by unsetting the variables in the bash preexec script. 
+
+Usage
+########
+
+Use the shell normally; navigate to localhost:5601 in a browser to view Kibana with your shell history. It will be necessary to create an index pattern in Kibana using the pattern "totalrecall" first.
+
+Go forth!

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.6
+#!/usr/bin/env python3
 import os
 import sys
 import json
@@ -6,7 +6,6 @@ import datetime
 
 import click
 import requests
-import asyncio_redis
 
 
 @click.command()

@@ -1,7 +1,6 @@
 version: '3'
 networks:
-  totalrecall:
-    external: true
+  totalrecall: {}
 
 services:
   redis:
