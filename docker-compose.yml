@@ -3,11 +3,11 @@ networks:
   totalrecall: {}
 
 services:
-  redis:
-    image: redis
-    restart: always
-    ports: ['127.0.0.1:16379:6379']
+  fluentbit:
+    image: fluent/fluent-bit:1.5 
     networks: ['totalrecall']
+    command: /fluent-bit/bin/fluent-bit fluent-bit -i tcp -o es -p Host=elasticsearch -p Index=totalrecall -p Type=event -m '*'
+    ports: ['127.0.0.1:5170:5170']
 
   elasticsearch:
     image: "elasticsearch:2"
@@ -24,25 +24,6 @@ services:
     ports: ['127.0.0.1:5601:5601']
     environment:
     - ELASTICSEARCH_URL=http://elasticsearch:9200
-
-  collector:
-    image: python:3.6
-    command: /bin/bash -c 'pip install -r requirements.txt && ./collector.py'
-    restart: always
-    networks: ['totalrecall']
-    ports: ['127.0.0.1:8080:8080']
-    working_dir: /var/trc/
-    volumes:
-    - $PWD/src:/var/trc
-
-  loader:
-    image: python:3.6
-    command: /bin/bash -c 'pip install -r requirements.txt && ./loader.py'
-    restart: always
-    networks: ['totalrecall']
-    working_dir: /var/trc/
-    volumes:
-    - $PWD/src:/var/trc
 
 volumes:
   esdata:
