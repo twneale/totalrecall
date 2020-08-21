@@ -15,6 +15,9 @@ import (
 
 
 func parseTimestamp(t string) time.Time {
+    if t == "" {
+        return time.Now()
+    }
     startRune := []rune(t)
     startRune[10] = 'T'
 	ts, err := time.Parse(time.RFC3339Nano, string(startRune))
@@ -62,6 +65,14 @@ func main() {
     returnCodePtr := flag.String("return-code", "", "Return code.")
     startTimestampPtr := flag.String("start-timestamp", "", "Start timestamp.")
     endTimestampPtr := flag.String("end-timestamp", "", "End timestamp.")
+    hostPtr := flag.String("host", "127.0.0.1", "Fluent-bit TCP host.")
+    portPtr := flag.String("port", "5170", "Fluent-bit TCP port.")
+    timeout, err := time.ParseDuration("50ms")
+    if err != nil {
+	   fmt.Println("error:", err)
+	   return
+    }
+    timeoutPtr := flag.Duration("timeout", timeout, "Fluent bit connection timeout.")
     flag.Parse()
 
     event := make(map[string]interface{})
@@ -86,7 +97,7 @@ func main() {
         pair := strings.SplitN(e, "=", 2)
         key := string(pair[0])
         value := string(pair[1])
-        if shouldSkipEnvVar(key, value) { 
+        if shouldSkipEnvVar(key, value) {
             continue
         }
         env[key] = getMaskedEnvVar(key, value)
@@ -99,15 +110,10 @@ func main() {
 		return
 	}
 
-    timeout, err := time.ParseDuration("50ms") 
+    conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%s", *hostPtr, *portPtr), *timeoutPtr)
 	if err != nil {
 		fmt.Println("error:", err)
-		return
-	}
-    conn, _ := net.DialTimeout("tcp", "127.0.0.1:5170", timeout)
-	if err != nil {
-		fmt.Println("error:", err)
-		return
+        return
 	}
 	fmt.Fprintf(conn, string(j) + "\n")
     conn.Close()

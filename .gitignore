@@ -1,4 +1,5 @@
 .env
+cli
 .python_history
 *.pyc
 .virt
