@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 import os
 import click
 import elasticsearch
@@ -8,7 +8,7 @@ import elasticsearch
 @click.argument('cmd', default=None)
 @click.option('--relevance', '-r', is_flag=True, help='Order by relevance instead of timestamp')
 def main(cmd, relevance):
-    es = elasticsearch.Elasticsearch()
+    es = elasticsearch.Elasticsearch(port=9201)
     query = {'query': {'match_all': {}}}
     query = {
         "query": {
@@ -22,6 +22,7 @@ def main(cmd, relevance):
 
     predicates = dict(PWD='must')
     for key, val in os.environ.items():
+        if key.startswith('___PREEXEC_'): continue
         pred = predicates.get(key, 'should')
         query['query']['bool'][pred].append({'match': {'env.' + key: val}})
 
@@ -31,8 +32,8 @@ def main(cmd, relevance):
     if cmd is not None:
         query['query']['bool']['must'].append({'match': {'command': cmd}})
 
-    #import pprint
-    #pprint.pprint(query)
+    import pprint
+    pprint.pprint(query)
     results = es.search(index='totalrecall', body=query)
     #import pdb; pdb.set_trace()
 

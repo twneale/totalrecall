@@ -1,2 +1,0 @@
-asyncio-redis
-elasticsearch-async
