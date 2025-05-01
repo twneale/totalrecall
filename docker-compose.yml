@@ -1,30 +1,30 @@
 version: '3'
 networks:
   totalrecall: {}
-
 services:
   fluentbit:
-    image: fluent/fluent-bit:1.5 
+    image: fluent/fluent-bit:4.0.1
+    restart: always
     networks: ['totalrecall']
-    command: /fluent-bit/bin/fluent-bit fluent-bit -i tcp -o es -p Host=elasticsearch -p Index=totalrecall -p Type=event -m '*'
+    command: /fluent-bit/bin/fluent-bit -i tcp -o es -p Host=elasticsearch -p Index=totalrecall -p Suppress_Type_Name=On -m '*'
     ports: ['127.0.0.1:5170:5170']
-
   elasticsearch:
-    image: "elasticsearch:2"
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.0.0
     restart: always
-    ports: ['127.0.0.1:9200:9200']
+    ports: ['127.0.0.1:9201:9200']
     networks: ['totalrecall']
-    volumes:
-    - esdata:/usr/share/elasticsearch/data
-
-  kibana:
-    image: "kibana:4"
-    restart: always
-    networks: ['totalrecall']
-    ports: ['127.0.0.1:5601:5601']
     environment:
-    - ELASTICSEARCH_URL=http://elasticsearch:9200
-
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.0.0
+    restart: always
+    networks: ['totalrecall']
+    ports: ['127.0.0.1:5602:5601']
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
 volumes:
   esdata:
     driver: local
