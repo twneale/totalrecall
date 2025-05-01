@@ -1,0 +1,20 @@
+{
+    "key": {
+        "algo": "rsa",
+        "size": 2048
+    },
+    "names": [
+        {
+            "C": "US",
+            "L": "Boston",
+            "O": "NBIS",
+            "OU": "eapp",
+            "ST": "Massachussetts"
+        }
+    ],
+    "hosts": [
+        "kibana",
+        "localhost"
+    ],
+    "CN": "kibana"
+}
