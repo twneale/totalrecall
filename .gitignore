@@ -2,4 +2,5 @@
 cli
 .python_history
 *.pyc
-.virt
+certs
+.DS_Store

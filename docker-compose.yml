@@ -2,27 +2,48 @@ version: '3'
 networks:
   totalrecall: {}
 services:
-  fluentbit:
+  haproxy:
+    image: haproxy:2.8
+    restart: always
+    ports:
+      - '127.0.0.1:8443:8443'  # Kibana via HAProxy
+      - '127.0.0.1:9243:9243'  # Elasticsearch via HAProxy
+    networks: ['totalrecall']
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./certs:/etc/ssl/certs:ro
+    depends_on:
+      - elasticsearch
+      - kibana
+
+  fluent-bit:
     image: fluent/fluent-bit:4.0.1
     restart: always
     networks: ['totalrecall']
-    command: /fluent-bit/bin/fluent-bit -i tcp -o es -p Host=elasticsearch -p Index=totalrecall -p Suppress_Type_Name=On -m '*'
+    command: /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluent-bit.conf
     ports: ['127.0.0.1:5170:5170']
+    volumes:
+      - ./fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./certs:/certs:ro
+
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:9.0.0
     restart: always
-    ports: ['127.0.0.1:9201:9200']
     networks: ['totalrecall']
+    expose:
+      - 9200
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
     volumes:
       - esdata:/usr/share/elasticsearch/data
+
   kibana:
     image: docker.elastic.co/kibana/kibana:9.0.0
     restart: always
     networks: ['totalrecall']
-    ports: ['127.0.0.1:5602:5601']
+    expose:
+      - 5601
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
 volumes:
