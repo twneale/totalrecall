@@ -5,7 +5,8 @@ function preexec() {
 }
 
 function precmd () {
-  ($TOTAL_RECALL_ROOT/cli \
+  ($TOTAL_RECALL_ROOT/bin/pwd-updater &)
+  ($TOTAL_RECALL_ROOT/bin/preexec-hook \
       -command="$___PREEXEC_CMD" \
       -return-code="$?" \
       -start-timestamp="$___PREEXEC_START_TIMESTAMP" -end-timestamp="$(gdate --rfc-3339=ns)" \

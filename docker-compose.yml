@@ -30,13 +30,21 @@ services:
     image: docker.elastic.co/elasticsearch/elasticsearch:9.0.0
     restart: always
     networks: ['totalrecall']
-    expose:
-      - 9200
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
     volumes:
       - esdata:/usr/share/elasticsearch/data
+
+  nats:
+    image: nats:2.9-alpine
+    restart: always
+    networks: ['totalrecall']
+    ports:
+      - '127.0.0.1:4222:4222'  # Client connections
+      - '127.0.0.1:8222:8222'  # HTTP monitoring
+    command: 
+      - "--jetstream"  # Enable JetStream for persistence if needed
 
   kibana:
     image: docker.elastic.co/kibana/kibana:9.0.0

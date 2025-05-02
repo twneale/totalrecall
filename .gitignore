@@ -1,4 +1,6 @@
+bin/
 .env
+*.log
 cli
 .python_history
 *.pyc
