@@ -103,19 +103,11 @@ func main() {
 		return event
 	})
 
-	// Current directory
-	currentDir := ""
-
 	// Watch for directory changes
 	go func() {
 		for dir := range dirChan {
-			if dir == currentDir {
-				continue
-			}
 
 			app.QueueUpdateDraw(func() {
-				// Update current directory
-				currentDir = dir
 
 				// Update header
 				header.Clear()

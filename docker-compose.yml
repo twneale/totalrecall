@@ -35,6 +35,7 @@ services:
       - xpack.security.enabled=false
     volumes:
       - esdata:/usr/share/elasticsearch/data
+    ports: ['127.0.0.1:9200:9200']
 
   nats:
     image: nats:2.9-alpine
@@ -52,6 +53,8 @@ services:
     networks: ['totalrecall']
     expose:
       - 5601
+    ports:
+      - '127.0.0.1:6601:5601'
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
 volumes:

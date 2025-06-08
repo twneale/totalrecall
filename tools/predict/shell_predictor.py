@@ -88,7 +88,7 @@ class ElasticsearchConnector:
             "query": {
                 "bool": {
                     "must": [
-                      {"term": {"pwd.keyword": os.getcwd()}},
+#                      {"term": {"pwd.keyword": os.getcwd()}},
                       {"match": {"return_code": 0}},
                     ],
                 }
@@ -124,7 +124,12 @@ class ElasticsearchConnector:
         
         query = {
             "query": {
-                "match_all": {}
+                "bool": {
+                    "must": [
+                      {"term": {"pwd.keyword": os.getcwd()}},
+                      {"match": {"return_code": 0}},
+                    ],
+                }
             },
             "sort": [
                 {"@timestamp": {"order": "desc"}}
@@ -252,8 +257,8 @@ class FeatureExtractor:
             
             # Get current working directory from PWD env var if available
             cwd = None
-            if 'env' in record and 'PWD' in record['env']:
-                cwd = record['env']['PWD']
+            if 'env' in record and 'OLDPWD' in record['env']:
+                cwd = record['env']['OLDPWD']
                 # Extract just the last directory name
                 if cwd:
                     cwd = os.path.basename(cwd)
@@ -269,6 +274,8 @@ class FeatureExtractor:
                 'cwd': cwd if cwd else '',
                 'return_code': record.get('return_code', 0)
             }
+            #import pprint; pprint.pprint(processed_record)
+            #import pdb; pdb.set_trace()
             
             processed_records.append(processed_record)
             previous_cmd = cmd
