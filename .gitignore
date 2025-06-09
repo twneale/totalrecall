@@ -6,3 +6,4 @@ cli
 *.pyc
 certs
 .DS_Store
+certs/
