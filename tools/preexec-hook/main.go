@@ -7,14 +7,14 @@ import (
     "time"
     "os"
     "net"
-    "strings"
     "strconv"
-    "regexp"
-    "crypto/sha256"
+    "strings"
     "encoding/json"
     "encoding/base64"
     "io/ioutil"
+    "path/filepath"
 )
+
 func parseTimestamp(t string) time.Time {
     if t == "" {
         return time.Now()
@@ -28,36 +28,41 @@ func parseTimestamp(t string) time.Time {
 	}
     return ts
 }
-func getMaskedEnvVar(key string, value string) string {
-    patterns := []string{"secret", "password", "key"}
-	for _, pattern := range patterns {
-		matched, err := regexp.MatchString("(?i)" + pattern, key)
-		if err != nil {
-			fmt.Println("error:", err)
-			panic(err)
-		}
-		if matched {
-            return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(value)))
-		}
-	}
-	return value
-}
-func shouldSkipEnvVar(key string, value string) bool {
-    // We have to skip PWD because it's usually inaccurate due to a race condition.
-    // The PWD will already have changed if we're cd'ing. So it has to be passed in 
-    // from bash-preexec.sh and ignored from the env vars.
-    patterns := []string{"^_+", "^PS1$", "^TERM$", "^PWD$", "TOTALRECALLROOT"}
-	for _, pattern := range patterns {
-		matched, err := regexp.MatchString("(?i)" + pattern, key)
-		if err != nil {
-			fmt.Println("error:", err)
-			panic(err)
-		}
-		if matched {
-            return matched
-		}
-	}
-	return false
+
+
+func parseEnvironmentString(envData string, config *EnvConfig) (map[string]string, error) {
+    rawEnv := map[string]string{}
+    
+    if envData == "" {
+        return rawEnv, nil
+    }
+    
+    // Decode base64 encoded environment
+    decoded, err := base64.StdEncoding.DecodeString(envData)
+    if err != nil {
+        return rawEnv, fmt.Errorf("failed to decode environment data: %v", err)
+    }
+    
+    // Parse environment lines
+    lines := strings.Split(string(decoded), "\n")
+    for _, line := range lines {
+        if line == "" {
+            continue
+        }
+        
+        pair := strings.SplitN(line, "=", 2)
+        if len(pair) != 2 {
+            continue
+        }
+        
+        key := pair[0]
+        value := pair[1]
+        
+        rawEnv[key] = value
+    }
+    
+    // Apply configuration-based filtering
+    return config.FilterEnvironment(rawEnv), nil
 }
 
 func getHostname() string {
@@ -90,8 +95,12 @@ func main() {
     endTimestampPtr := flag.String("end-timestamp", "", "End timestamp.")
     hostPtr := flag.String("host", "127.0.0.1", "Fluent-bit TCP host.")
     portPtr := flag.String("port", "5170", "Fluent-bit TCP port.")
-    // Add PWD flag
     pwdPtr := flag.String("pwd", "", "Working directory (required).")
+    envPtr := flag.String("env", "", "Base64 encoded environment variables.")
+    configPtr := flag.String("env-config", "", "Path to environment filtering configuration file.")
+    generateConfigPtr := flag.Bool("generate-config", false, "Generate default configuration file and exit.")
+    testPtr := flag.Bool("test", false, "Test environment filtering and print results without sending data.")
+    
     timeout, err := time.ParseDuration("3s")
     if err != nil {
 	   fmt.Println("error:", err)
@@ -106,6 +115,67 @@ func main() {
     keyFilePtr := flag.String("tls-key-file", "certs/client.key", "Client private key file")
     
     flag.Parse()
+    
+    // Handle config generation
+    if *generateConfigPtr {
+        configPath := *configPtr
+        if configPath == "" {
+            homeDir, err := os.UserHomeDir()
+            if err != nil {
+                fmt.Println("error getting home directory:", err)
+                return
+            }
+            configPath = filepath.Join(homeDir, ".totalrecall", "env-config.json")
+        }
+        
+        if err := SaveDefaultConfig(configPath); err != nil {
+            fmt.Println("error generating config:", err)
+            return
+        }
+        
+        fmt.Printf("Generated default configuration at: %s\n", configPath)
+        fmt.Println("You can edit this file to customize environment variable filtering.")
+        return
+    }
+    
+    // Load environment filtering configuration
+    envConfig, err := LoadEnvConfig(*configPtr)
+    if err != nil {
+        fmt.Println("error loading environment config:", err)
+        return
+    }
+    
+    // Handle test mode
+    if *testPtr {
+        fmt.Println("Testing environment filtering configuration...")
+        fmt.Println("Environment variables that would be captured:")
+        fmt.Println("")
+        
+        // Get current environment
+        rawEnv := map[string]string{}
+        for _, e := range os.Environ() {
+            pair := strings.SplitN(e, "=", 2)
+            if len(pair) != 2 {
+                continue
+            }
+            rawEnv[pair[0]] = pair[1]
+        }
+        
+        // Filter environment
+        filtered := envConfig.FilterEnvironment(rawEnv)
+        
+        // Print results
+        if len(filtered) == 0 {
+            fmt.Println("(No environment variables would be captured)")
+        } else {
+            for key, value := range filtered {
+                fmt.Printf("%s=%s\n", key, value)
+            }
+        }
+        
+        fmt.Printf("\nWould capture %d out of %d total environment variables\n", len(filtered), len(rawEnv))
+        return
+    }
     
     // Validate that PWD was provided
     if *pwdPtr == "" {
@@ -128,26 +198,40 @@ func main() {
     event["return_code"] = returnCode
     event["start_timestamp"] = parseTimestamp(*startTimestampPtr)
     event["end_timestamp"] = parseTimestamp(*endTimestampPtr)
-    // Add PWD to the event
     event["pwd"] = *pwdPtr
-    // Add hostname
     event["hostname"] = getHostname()
+    
     // Add IP address if available
     if ip := getLocalIP(); ip != "" {
         event["ip_address"] = ip
     }
     
-    env := map[string]string{}
-    for _, e := range os.Environ() {
-        pair := strings.SplitN(e, "=", 2)
-        key := string(pair[0])
-        value := string(pair[1])
-        if shouldSkipEnvVar(key, value) {
-            continue
+    // Parse and filter environment from parameter
+    var env map[string]string
+    if *envPtr != "" {
+        env, err = parseEnvironmentString(*envPtr, envConfig)
+        if err != nil {
+            fmt.Println("error parsing environment:", err)
+            return
         }
-        env[key] = getMaskedEnvVar(key, value)
-       }
-    event["env"] = env
+    } else {
+        // Fallback to current environment if no env parameter provided
+        rawEnv := map[string]string{}
+        for _, e := range os.Environ() {
+            pair := strings.SplitN(e, "=", 2)
+            if len(pair) != 2 {
+                continue
+            }
+            rawEnv[pair[0]] = pair[1]
+        }
+        env = envConfig.FilterEnvironment(rawEnv)
+    }
+    
+    // Only include env in the event if it's not empty
+    if len(env) > 0 {
+        event["env"] = env
+    }
+    
     j, err := json.Marshal(event)
 	if err != nil {
 		fmt.Println("error:", err)

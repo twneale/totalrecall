@@ -1,0 +1,133 @@
+{
+  "index_patterns": ["totalrecall*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "index.refresh_interval": "5s"
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": {
+          "type": "date"
+        },
+        "command": {
+          "type": "text",
+          "fields": {
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 1024
+            }
+          },
+          "analyzer": "standard"
+        },
+        "return_code": {
+          "type": "integer"
+        },
+        "start_timestamp": {
+          "type": "date"
+        },
+        "end_timestamp": {
+          "type": "date"
+        },
+        "pwd": {
+          "type": "keyword",
+          "ignore_above": 512
+        },
+        "hostname": {
+          "type": "keyword",
+          "ignore_above": 256
+        },
+        "ip_address": {
+          "type": "ip"
+        },
+        "env": {
+          "type": "object",
+          "properties": {
+            "PWD": {
+              "type": "keyword",
+              "ignore_above": 512
+            },
+            "OLDPWD": {
+              "type": "keyword", 
+              "ignore_above": 512
+            },
+            "USER": {
+              "type": "keyword",
+              "ignore_above": 64
+            },
+            "HOME": {
+              "type": "keyword",
+              "ignore_above": 256
+            },
+            "SHELL": {
+              "type": "keyword",
+              "ignore_above": 128
+            },
+            "NODE_ENV": {
+              "type": "keyword",
+              "ignore_above": 32
+            },
+            "RAILS_ENV": {
+              "type": "keyword",
+              "ignore_above": 32
+            },
+            "AWS_PROFILE": {
+              "type": "keyword",
+              "ignore_above": 64
+            },
+            "AWS_REGION": {
+              "type": "keyword",
+              "ignore_above": 32
+            },
+            "DOCKER_HOST": {
+              "type": "keyword",
+              "ignore_above": 256
+            },
+            "KUBERNETES_NAMESPACE": {
+              "type": "keyword",
+              "ignore_above": 64
+            },
+            "KUBECTL_CONTEXT": {
+              "type": "keyword",
+              "ignore_above": 128
+            }
+          },
+          "dynamic_templates": [
+            {
+              "env_hashed_values": {
+                "match": "*",
+                "match_pattern": "regex",
+                "path_match": "env.*",
+                "mapping": {
+                  "type": "keyword",
+                  "ignore_above": 32,
+                  "index": true
+                },
+                "match_mapping_type": "string",
+                "unmatch": "PWD|OLDPWD|USER|HOME|SHELL|NODE_ENV|RAILS_ENV|AWS_PROFILE|AWS_REGION|DOCKER_HOST|KUBERNETES_NAMESPACE|KUBECTL_CONTEXT"
+              }
+            },
+            {
+              "env_noise_fields": {
+                "match_pattern": "regex",
+                "path_match": "env\\.(HISTSIZE|HISTFILE|HISTCONTROL|LANG|LC_.*|TMPDIR|XDG_.*)",
+                "mapping": {
+                  "type": "keyword",
+                  "index": false,
+                  "doc_values": false
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "priority": 100,
+  "version": 1,
+  "_meta": {
+    "description": "Template for Total Recall shell command history",
+    "created_by": "total-recall"
+  }
+}

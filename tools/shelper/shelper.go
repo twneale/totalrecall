@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,9 +22,6 @@ type Command struct {
 	Command     string    `json:"command"`
 	Timestamp   time.Time `json:"@timestamp"`
 	ReturnCode  int       `json:"return_code"`
-	Environment struct {
-		OLDPWD string `json:"OLDPWD"`
-	} `json:"env"`
 }
 
 // SearchResult represents the Elasticsearch search results
@@ -44,6 +43,41 @@ type SearchResult struct {
 	} `json:"hits"`
 }
 
+// getMaskedEnvVar returns the masked/hashed value for sensitive environment variables
+// This mirrors the logic in the preexec hook
+func getMaskedEnvVar(key string, value string) string {
+	patterns := []string{"secret", "password", "key"}
+	for _, pattern := range patterns {
+		matched, err := regexp.MatchString("(?i)"+pattern, key)
+		if err != nil {
+			log.Printf("error in regex: %s", err)
+			return value // Return original value on error
+		}
+		if matched {
+			return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(value)))
+		}
+	}
+	return value
+}
+
+// shouldSkipEnvVar checks if an environment variable should be skipped
+// This mirrors the logic in the preexec hook
+func shouldSkipEnvVar(key string, value string) bool {
+	// Skip the same variables that the preexec hook skips
+	patterns := []string{"^_+", "^PS1$", "^TERM$", "^PWD$", "TOTALRECALLROOT"}
+	for _, pattern := range patterns {
+		matched, err := regexp.MatchString("(?i)"+pattern, key)
+		if err != nil {
+			log.Printf("error in regex: %s", err)
+			continue
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	// Parse command line flags
 	esHost := flag.String("host", "http://localhost:9200", "Elasticsearch host URL")
@@ -53,6 +87,7 @@ func main() {
 	dirPath := flag.String("dir", "", "Directory path to search for (if -pwd=false)")
 	username := flag.String("user", "", "Elasticsearch username")
 	password := flag.String("pass", "", "Elasticsearch password")
+	debug := flag.Bool("debug", false, "Print debug information including the query")
 	flag.Parse()
 
 	// Determine which directory to search for
@@ -97,7 +132,6 @@ func main() {
 	res.Body.Close()
 
 	// Build the search query with enhanced relevance based on environment
-	// Initialize query structure
 	query := map[string]interface{}{
 		"size": *numResults,
 		"query": map[string]interface{}{
@@ -105,7 +139,7 @@ func main() {
 				"must": []map[string]interface{}{
 					{
 						"term": map[string]interface{}{
-							"env.OLDPWD.keyword": searchDir,
+							"pwd.keyword": searchDir,
 						},
 					},
 					{
@@ -129,40 +163,56 @@ func main() {
 				},
 			},
 		},
-		"_source": []string{"command", "@timestamp", "return_code", "env"},
+		"_source": []string{"command", "@timestamp", "return_code", "env", "pwd"},
 	}
-	
+
 	// Add current environment variables to improve relevance
 	environ := os.Environ()
 	shouldClauses := query["query"].(map[string]interface{})["bool"].(map[string]interface{})["should"].([]map[string]interface{})
-	
+
+	envVarsUsed := 0
 	for _, env := range environ {
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		key, value := parts[0], parts[1]
-		
-		// Skip OLDPWD as it's already in the must clause
-		if key == "OLDPWD" {
+
+		// Skip environment variables that the preexec hook doesn't store
+		if shouldSkipEnvVar(key, value) {
+			if *debug {
+				fmt.Printf("Skipping env var: %s (filtered by preexec hook)\n", key)
+			}
 			continue
 		}
-        // Skip PWD to prevent getting wrong commands.
-        if key == "PWD" {
-            continue
-        }
-		
-		// Add all other environment variables as should clauses
+
+		// Get the masked value (in case it's a sensitive variable)
+		maskedValue := getMaskedEnvVar(key, value)
+
+		// Add environment variable as should clause
 		shouldClauses = append(shouldClauses, map[string]interface{}{
 			"match": map[string]interface{}{
-				fmt.Sprintf("env.%s", key): value,
+				fmt.Sprintf("env.%s", key): maskedValue,
 			},
 		})
+		envVarsUsed++
+
+		if *debug {
+			if maskedValue != value {
+				fmt.Printf("Using masked env var: %s = %s (original was masked)\n", key, maskedValue)
+			} else {
+				fmt.Printf("Using env var: %s = %s\n", key, value)
+			}
+		}
 	}
-	
+
 	// Update the should clauses in the query
 	query["query"].(map[string]interface{})["bool"].(map[string]interface{})["should"] = shouldClauses
+
+	if *debug {
+		fmt.Printf("Using %d environment variables for relevance scoring\n", envVarsUsed)
+	}
 
 	// Convert query to JSON
 	var buf bytes.Buffer
@@ -170,10 +220,16 @@ func main() {
 		log.Fatalf("Error encoding query: %s", err)
 	}
 
-	// Debug: Print the query (optional, comment out in production)
-	fmt.Println("Query:")
-	json.NewEncoder(os.Stdout).Encode(query)
-	
+	// Debug: Print the query if requested
+	if *debug {
+		fmt.Println("\nElasticsearch Query:")
+		var prettyQuery bytes.Buffer
+		if err := json.Indent(&prettyQuery, buf.Bytes(), "", "  "); err == nil {
+			fmt.Println(prettyQuery.String())
+		}
+		fmt.Println()
+	}
+
 	// Execute the search
 	res, err = es.Search(
 		es.Search.WithContext(context.Background()),
@@ -186,6 +242,10 @@ func main() {
 	}
 	defer res.Body.Close()
 
+	if res.IsError() {
+		log.Fatalf("Elasticsearch returned error: %s", res.String())
+	}
+
 	// Parse the response
 	var result SearchResult
 	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
@@ -194,11 +254,11 @@ func main() {
 
 	// Display the results
 	fmt.Printf("Found %d commands\n\n", result.Hits.Total.Value)
-	
+
 	// Extract unique commands (to avoid duplicates)
 	uniqueCommands := make(map[string]float64)
 	cmdDirs := make(map[string]string) // Store directory for each command
-	
+
 	for _, hit := range result.Hits.Hits {
 		cmd := hit.Source.Command
 		// Skip empty commands
@@ -208,13 +268,18 @@ func main() {
 		// Keep only the highest score for each unique command
 		if _, exists := uniqueCommands[cmd]; !exists || hit.Score > uniqueCommands[cmd] {
 			uniqueCommands[cmd] = hit.Score
-			cmdDirs[cmd] = hit.Source.Environment.OLDPWD
+			cmdDir := searchDir
+			cmdDirs[cmd] = cmdDir
 		}
 	}
 
-	// Sort and print commands
-	fmt.Printf("%-10s | %s\n", "SCORE", "COMMAND")
-	fmt.Println(strings.Repeat("-", 80))
+	if len(uniqueCommands) == 0 {
+		fmt.Println("No commands found for the specified directory.")
+		if *debug {
+			fmt.Println("Try running with -debug to see the query being executed.")
+		}
+		return
+	}
 
 	// Convert map to sorted slice (by score)
 	type cmdScore struct {
@@ -237,21 +302,22 @@ func main() {
 		sortedCommands[i], sortedCommands[max] = sortedCommands[max], sortedCommands[i]
 	}
 
-	// Print results
+	// Print results header
 	fmt.Printf("%-10s | %-50s | %s\n", "SCORE", "COMMAND", "DIRECTORY")
 	fmt.Println(strings.Repeat("-", 100))
-	
+
+	// Print results
 	count := 0
 	for _, cmd := range sortedCommands {
 		// Get directory (basename only for cleaner display)
 		dirPath := cmdDirs[cmd.Command]
 		dirName := filepath.Base(dirPath)
-		
+
 		// If current directory, add a marker
 		if dirPath == searchDir {
 			dirName = "*" + dirName
 		}
-		
+
 		fmt.Printf("%-10.2f | %-50s | %s\n", cmd.Score, cmd.Command, dirName)
 		count++
 		if count >= *numResults {

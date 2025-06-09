@@ -33,9 +33,15 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"  # Reduce memory usage for local dev
     volumes:
       - esdata:/usr/share/elasticsearch/data
     ports: ['127.0.0.1:9200:9200']
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   nats:
     image: nats:2.9-alpine
@@ -57,6 +63,33 @@ services:
       - '127.0.0.1:6601:5601'
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_PUBLICBASEURL=http://localhost:8443  # For HAProxy
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Setup service to configure Elasticsearch and Kibana
+  kibana-setup:
+    image: curlimages/curl:latest
+    networks: ['totalrecall']
+    volumes:
+      - ./kibana-setup:/setup:ro
+    environment:
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - KIBANA_URL=http://kibana:5601
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      kibana:
+        condition: service_healthy
+    command: ["/bin/sh", "/setup/setup.sh"]
+    restart: "no"  # Only run once
+
 volumes:
   esdata:
     driver: local

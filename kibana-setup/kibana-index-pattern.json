@@ -1,0 +1,23 @@
+{
+  "version": "8.0.0",
+  "objects": [
+    {
+      "id": "totalrecall-*",
+      "type": "index-pattern",
+      "updated_at": "2025-01-01T00:00:00.000Z",
+      "version": "WzEsMV0=",
+      "attributes": {
+        "title": "totalrecall*",
+        "timeFieldName": "start_timestamp",
+        "fields": "[{\"name\":\"@timestamp\",\"type\":\"date\",\"esTypes\":[\"date\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"command\",\"type\":\"string\",\"esTypes\":[\"text\"],\"searchable\":true,\"aggregatable\":false,\"readFromDocValues\":false},{\"name\":\"command.keyword\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"end_timestamp\",\"type\":\"date\",\"esTypes\":[\"date\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.AWS_PROFILE\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.AWS_REGION\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.DOCKER_HOST\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.HOME\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.KUBERNETES_NAMESPACE\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.KUBECTL_CONTEXT\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.NODE_ENV\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.OLDPWD\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.PWD\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.RAILS_ENV\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.SHELL\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"env.USER\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"hostname\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"ip_address\",\"type\":\"ip\",\"esTypes\":[\"ip\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"pwd\",\"type\":\"string\",\"esTypes\":[\"keyword\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"return_code\",\"type\":\"number\",\"esTypes\":[\"integer\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true},{\"name\":\"start_timestamp\",\"type\":\"date\",\"esTypes\":[\"date\"],\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":true}]",
+        "fieldFormatMap": "{\"start_timestamp\":{\"id\":\"date\",\"params\":{\"pattern\":\"YYYY-MM-DD HH:mm:ss.SSS\"}},\"end_timestamp\":{\"id\":\"date\",\"params\":{\"pattern\":\"YYYY-MM-DD HH:mm:ss.SSS\"}}}",
+        "runtimeFieldMap": "{}",
+        "allowNoIndex": false
+      },
+      "references": [],
+      "migrationVersion": {
+        "index-pattern": "7.11.0"
+      }
+    }
+  ]
+}
