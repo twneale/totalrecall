@@ -18,21 +18,123 @@
             "match": "^h8_[a-f0-9]{8}$",
             "mapping": {
               "type": "keyword",
-              "index": true
+              "ignore_above": 32,
+              "index": true,
+              "doc_values": true,
+              "meta": {
+                "field_type": "hashed_value"
+              }
             }
           }
         },
         {
-          "env_strings": {
+          "env_paths": {
+            "path_match": "env.*",
+            "match_pattern": "regex", 
+            "match": "^(/[^\\s]*|[A-Z]:\\\\[^\\s]*)$",
+            "mapping": {
+              "type": "keyword",
+              "ignore_above": 512,
+              "index": true,
+              "doc_values": true,
+              "meta": {
+                "field_type": "path"
+              }
+            }
+          }
+        },
+        {
+          "env_urls": {
+            "path_match": "env.*",
+            "match_pattern": "regex",
+            "match": "^https?://.*",
+            "mapping": {
+              "type": "keyword", 
+              "ignore_above": 256,
+              "index": false,
+              "doc_values": false,
+              "meta": {
+                "field_type": "url",
+                "security_risk": "high"
+              }
+            }
+          }
+        },
+        {
+          "env_version_numbers": {
+            "path_match": "env.*",
+            "match_pattern": "regex",
+            "match": "^\\d+\\.\\d+(\\.\\d+)?",
+            "mapping": {
+              "type": "version",
+              "meta": {
+                "field_type": "version"
+              }
+            }
+          }
+        },
+        {
+          "env_booleans": {
+            "path_match": "env.*",
+            "match_pattern": "regex", 
+            "match": "^(true|false|1|0|yes|no|on|off)$",
+            "mapping": {
+              "type": "boolean",
+              "meta": {
+                "field_type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "env_numeric": {
+            "path_match": "env.*",
+            "match_mapping_type": "long",
+            "mapping": {
+              "type": "long",
+              "meta": {
+                "field_type": "number"
+              }
+            }
+          }
+        },
+        {
+          "env_noindex_noise": {
+            "path_match": "env.*",
+            "match_pattern": "regex",
+            "match": "(HIST|LESS|LS_COLORS|TERM|COLORTERM|LANG|LC_)",
+            "mapping": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false,
+              "meta": {
+                "field_type": "noise",
+                "index_reason": "excluded_noise"
+              }
+            }
+          }
+        },
+        {
+          "env_default_keyword": {
             "path_match": "env.*",
             "mapping": {
-              "type": "text",
-              "fields": {
-                "keyword": {
-                  "type": "keyword",
-                  "ignore_above": 256
-                }
+              "type": "keyword",
+              "ignore_above": 256,
+              "index": true,
+              "doc_values": true,
+              "meta": {
+                "field_type": "default_env"
               }
+            }
+          }
+        },
+        {
+          "string_fields_as_keyword": {
+            "match_mapping_type": "string",
+            "unmatch": "command",
+            "mapping": {
+              "type": "keyword",
+              "ignore_above": 256
             }
           }
         }
@@ -48,16 +150,8 @@
               "type": "keyword",
               "ignore_above": 1024
             }
-          }
-        },
-        "pwd": {
-          "type": "text",
-          "fields": {
-            "keyword": {
-              "type": "keyword",
-              "ignore_above": 512
-            }
-          }
+          },
+          "analyzer": "standard"
         },
         "return_code": {
           "type": "integer"
@@ -68,17 +162,35 @@
         "end_timestamp": {
           "type": "date"
         },
+        "pwd": {
+          "type": "keyword",
+          "ignore_above": 512
+        },
         "hostname": {
-          "type": "keyword"
+          "type": "keyword",
+          "ignore_above": 256
         },
         "ip_address": {
           "type": "ip"
+        },
+        "env": {
+          "type": "object",
+          "dynamic": true
+        },
+        "_config_version": {
+          "type": "keyword",
+          "meta": {
+            "description": "Version of the env config used when indexing"
+          }
         }
       }
     }
   },
   "priority": 100,
+  "version": 2,
   "_meta": {
-    "description": "Total Recall shell command history index template"
+    "description": "Template for Total Recall shell command history with robust dynamic mapping",
+    "created_by": "total-recall",
+    "updated": "2025-01-01"
   }
 }  

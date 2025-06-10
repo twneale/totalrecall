@@ -7,12 +7,13 @@ import (
     "time"
     "os"
     "net"
-    "strconv"
     "strings"
+    "strconv"
+    "regexp"
+    "crypto/sha256"
     "encoding/json"
     "encoding/base64"
     "io/ioutil"
-    "path/filepath"
 )
 
 func parseTimestamp(t string) time.Time {
@@ -29,6 +30,20 @@ func parseTimestamp(t string) time.Time {
     return ts
 }
 
+func getMaskedEnvVar(key string, value string) string {
+    patterns := []string{"secret", "password", "key"}
+	for _, pattern := range patterns {
+		matched, err := regexp.MatchString("(?i)" + pattern, key)
+		if err != nil {
+			fmt.Println("error:", err)
+			panic(err)
+		}
+		if matched {
+            return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(value)))
+		}
+	}
+	return value
+}
 
 func parseEnvironmentString(envData string, config *EnvConfig) (map[string]string, error) {
     rawEnv := map[string]string{}
@@ -231,6 +246,9 @@ func main() {
     if len(env) > 0 {
         event["env"] = env
     }
+    
+    // Add config version for tracking
+    event["_config_version"] = envConfig.Version
     
     j, err := json.Marshal(event)
 	if err != nil {
