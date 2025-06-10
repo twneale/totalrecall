@@ -216,9 +216,6 @@ func (tui *ReactiveTUI) render() {
 			i+1, statusIcon, command, pwd, float64(duration.Nanoseconds())/1000000)
 	}
 	
-	// Show current stats
-	fmt.Printf("\n📊 Stats: %d events displayed\n", len(tui.recentEvents))
-	
 	// Future enhancement suggestions
 	if len(tui.recentEvents) >= 5 {
 		tui.suggestCommands()

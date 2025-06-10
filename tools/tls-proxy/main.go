@@ -19,6 +19,14 @@ import (
 	"time"
 )
 
+var debugMode bool
+
+func debugLog(format string, args ...interface{}) {
+	if debugMode {
+		log.Printf("[DEBUG] "+format, args...)
+	}
+}
+
 type Subscriber struct {
 	id     string
 	conn   net.Conn
@@ -58,7 +66,7 @@ func (hub *PubSubHub) Subscribe(id string, conn net.Conn, filter map[string]stri
 	hub.subscribers[id] = subscriber
 	hub.totalSubs++
 
-	log.Printf("New subscriber: %s (total: %d)", id, len(hub.subscribers))
+	debugLog("New subscriber: %s (total: %d)", id, len(hub.subscribers))
 }
 
 func (hub *PubSubHub) Unsubscribe(id string) {
@@ -68,7 +76,7 @@ func (hub *PubSubHub) Unsubscribe(id string) {
 	if subscriber, exists := hub.subscribers[id]; exists {
 		subscriber.conn.Close()
 		delete(hub.subscribers, id)
-		log.Printf("Subscriber disconnected: %s (remaining: %d)", id, len(hub.subscribers))
+		debugLog("Subscriber disconnected: %s (remaining: %d)", id, len(hub.subscribers))
 	}
 }
 
@@ -77,11 +85,11 @@ func (hub *PubSubHub) Publish(eventData []byte) {
 	defer hub.subMutex.RUnlock()
 
 	if len(hub.subscribers) == 0 {
-		log.Printf("Debug: No subscribers to publish to")
+		debugLog("No subscribers to publish to")
 		return
 	}
 
-	log.Printf("Debug: Publishing to %d subscribers: %s", len(hub.subscribers), string(eventData))
+	debugLog("Publishing to %d subscribers: %s", len(hub.subscribers), string(eventData))
 
 	// Parse event to enable filtering
 	var event map[string]interface{}
@@ -106,10 +114,10 @@ func (hub *PubSubHub) Publish(eventData []byte) {
 		subscriber.conn.SetWriteDeadline(time.Time{})
 
 		if err != nil {
-			log.Printf("Debug: Failed to send to subscriber %s: %v", id, err)
+			debugLog("Failed to send to subscriber %s: %v", id, err)
 			deadSubs = append(deadSubs, id)
 		} else {
-			log.Printf("Debug: Successfully sent to subscriber %s", id)
+			debugLog("Successfully sent to subscriber %s", id)
 		}
 	}
 
@@ -154,6 +162,7 @@ type TLSProxy struct {
 	totalSent    int64
 	totalErrors  int64
 	pubsub       *PubSubHub
+	listener     net.Listener
 }
 
 func NewTLSProxy(socketPath, targetAddr string, tlsConfig *tls.Config, poolSize int) *TLSProxy {
@@ -200,6 +209,7 @@ func (p *TLSProxy) getConnection() (*tls.Conn, error) {
 	p.activeConns++
 	p.connMutex.Unlock()
 
+	debugLog("Created new TLS connection (active: %d)", p.activeConns)
 	return conn, nil
 }
 
@@ -207,13 +217,14 @@ func (p *TLSProxy) getConnection() (*tls.Conn, error) {
 func (p *TLSProxy) returnConnection(conn *tls.Conn) {
 	select {
 	case p.connections <- conn:
-		// Successfully returned to pool
+		debugLog("Returned connection to pool")
 	default:
 		// Pool is full, close the connection
 		conn.Close()
 		p.connMutex.Lock()
 		p.activeConns--
 		p.connMutex.Unlock()
+		debugLog("Pool full, closed connection (active: %d)", p.activeConns)
 	}
 }
 
@@ -244,25 +255,25 @@ func (p *TLSProxy) sendToFluentBit(data []byte) error {
 
 	p.totalSent++
 	p.returnConnection(conn)
+	debugLog("Successfully sent data to fluent-bit")
 	return nil
 }
 
 // Process incoming data (send to fluent-bit AND publish locally)
 func (p *TLSProxy) processEvent(data []byte) error {
-	// Debug: log what we're processing
-	log.Printf("Debug: Processing event data: %s", string(data))
-	
 	// Validate JSON before processing
 	var testParse map[string]interface{}
 	if err := json.Unmarshal(data, &testParse); err != nil {
-		log.Printf("Warning: Received invalid JSON, skipping: %v", err)
+		debugLog("Received invalid JSON, skipping: %v", err)
 		return fmt.Errorf("invalid JSON: %v", err)
 	}
+	
+	debugLog("Processing event: %s", string(data))
 	
 	// Send to fluent-bit (for remote storage)
 	fluentErr := p.sendToFluentBit(data)
 	if fluentErr != nil {
-		log.Printf("Failed to send to fluent-bit: %v", fluentErr)
+		debugLog("Failed to send to fluent-bit: %v", fluentErr)
 		// Don't return error - local pub/sub can still work
 	}
 
@@ -333,13 +344,14 @@ func (p *TLSProxy) handleClient(clientConn net.Conn) {
 			filterStr = strings.Join(parts[2:], " ")
 		}
 
+		debugLog("Handling subscriber: %s with filter: %s", subscriberID, filterStr)
 		p.handleSubscriber(clientConn, subscriberID, filterStr)
 		return
 	}
 
 	// Otherwise, treat as publisher - process the first line as an event
 	if err := p.processEvent([]byte(firstLine)); err != nil {
-		log.Printf("Failed to process event: %v", err)
+		debugLog("Failed to process event: %v", err)
 	}
 
 	// Continue reading more events from this publisher
@@ -351,13 +363,13 @@ func (p *TLSProxy) handleClient(clientConn net.Conn) {
 		}
 
 		if err := p.processEvent(line); err != nil {
-			log.Printf("Failed to process event: %v", err)
+			debugLog("Failed to process event: %v", err)
 			// Don't break the connection on send errors
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading from client: %v", err)
+		debugLog("Error reading from client: %v", err)
 	}
 }
 
@@ -373,7 +385,9 @@ func (p *TLSProxy) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create unix socket: %v", err)
 	}
-	defer listener.Close()
+	
+	// Store listener reference for cleanup
+	p.listener = listener
 
 	// Set socket permissions to be writable by owner only for security
 	if err := os.Chmod(p.socketPath, 0600); err != nil {
@@ -382,27 +396,36 @@ func (p *TLSProxy) Start(ctx context.Context) error {
 
 	log.Printf("TLS proxy listening on %s", p.socketPath)
 	log.Printf("Forwarding to fluent-bit: %s", p.targetAddr)
-	log.Printf("Local pub/sub enabled for reactive TUI")
-	log.Printf("Connection pool size: %d", p.poolSize)
+	if debugMode {
+		log.Printf("Debug mode enabled")
+	}
 
 	// Start statistics goroutine
 	go p.printStats(ctx)
 
+	// Start goroutine to handle context cancellation
+	go func() {
+		<-ctx.Done()
+		debugLog("Context cancelled, closing listener")
+		listener.Close()
+	}()
+
 	// Accept connections
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		conn, err := listener.Accept()
 		if err != nil {
+			// Check if we're shutting down
 			select {
 			case <-ctx.Done():
+				debugLog("Shutting down due to context cancellation")
 				return ctx.Err()
 			default:
-				log.Printf("Failed to accept connection: %v", err)
+				// Check if error is due to listener being closed
+				if ne, ok := err.(*net.OpError); ok && ne.Op == "accept" {
+					debugLog("Listener closed, shutting down")
+					return nil
+				}
+				debugLog("Failed to accept connection: %v", err)
 				continue
 			}
 		}
@@ -436,12 +459,22 @@ func (p *TLSProxy) printStats(ctx context.Context) {
 	}
 }
 
-// Close all connections in the pool
+// Close all connections and cleanup
 func (p *TLSProxy) Close() {
+	debugLog("Closing TLS proxy...")
+	
+	// Close the listener if it exists
+	if p.listener != nil {
+		p.listener.Close()
+	}
+	
+	// Close connection pool
 	close(p.connections)
 	for conn := range p.connections {
 		conn.Close()
 	}
+	
+	debugLog("TLS proxy closed")
 }
 
 func loadTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
@@ -478,8 +511,12 @@ func main() {
 		caFile     = flag.String("ca-file", "certs/ca.crt", "CA certificate file")
 		certFile   = flag.String("cert-file", "certs/client.crt", "Client certificate file")
 		keyFile    = flag.String("key-file", "certs/client.key", "Client key file")
+		debug      = flag.Bool("debug", false, "Enable debug logging")
 	)
 	flag.Parse()
+
+	// Set debug mode from flag
+	debugMode = *debug
 
 	// Load TLS configuration
 	tlsConfig, err := loadTLSConfig(*caFile, *certFile, *keyFile)
@@ -491,24 +528,27 @@ func main() {
 	targetAddr := fmt.Sprintf("%s:%s", *targetHost, *targetPort)
 	proxy := NewTLSProxy(*socketPath, targetAddr, tlsConfig, *poolSize)
 
-	// Handle shutdown gracefully
+	// Create cancellable context
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
+	// Handle shutdown signals gracefully
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
+	// Start signal handler in goroutine
 	go func() {
-		<-sigChan
-		log.Println("Shutting down proxy...")
-		cancel()
+		sig := <-sigChan
+		log.Printf("Received signal %v, shutting down...", sig)
+		cancel() // Cancel context to stop all operations
 	}()
 
-	// Start proxy
-	if err := proxy.Start(ctx); err != nil && err != context.Canceled {
-		log.Fatalf("Proxy failed: %v", err)
+	// Start proxy (this will block until context is cancelled)
+	err = proxy.Start(ctx)
+	if err != nil && err != context.Canceled {
+		log.Printf("Proxy error: %v", err)
 	}
 
+	// Cleanup
 	proxy.Close()
 	os.Remove(*socketPath)
 	log.Println("Proxy shutdown complete")
