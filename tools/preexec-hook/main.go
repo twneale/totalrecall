@@ -87,6 +87,71 @@ func getLocalIP() string {
     return ""
 }
 
+func sendViaUnixSocket(data []byte, socketPath string, timeout time.Duration) error {
+	// Connect to unix domain socket
+	conn, err := net.DialTimeout("unix", socketPath, timeout)
+	if err != nil {
+		return fmt.Errorf("failed to connect to proxy socket: %v", err)
+	}
+	defer conn.Close()
+
+	// Set write deadline
+	conn.SetWriteDeadline(time.Now().Add(timeout))
+	
+	// Send data
+	_, err = conn.Write(append(data, '\n'))
+	if err != nil {
+		return fmt.Errorf("failed to send data: %v", err)
+	}
+
+	return nil
+}
+
+func sendDirectTLS(data []byte, host, port string, enableTLS bool, caFile, certFile, keyFile string, timeout time.Duration) error {
+    address := fmt.Sprintf("%s:%s", host, port)
+    
+    if enableTLS {
+        // ... existing TLS connection code ...
+        caCert, err := ioutil.ReadFile(caFile)
+        if err != nil {
+            return fmt.Errorf("error loading CA certificate: %v", err)
+        }
+        caCertPool := x509.NewCertPool()
+        caCertPool.AppendCertsFromPEM(caCert)
+        
+        cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+        if err != nil {
+            return fmt.Errorf("error loading client certificate: %v", err)
+        }
+        
+        tlsConfig := &tls.Config{
+            RootCAs:            caCertPool,
+            Certificates:       []tls.Certificate{cert},
+            InsecureSkipVerify: false,
+        }
+        
+        dialer := &net.Dialer{Timeout: timeout}
+        conn, err := tls.DialWithDialer(dialer, "tcp", address, tlsConfig)
+        if err != nil {
+            return fmt.Errorf("error connecting with TLS: %v", err)
+        }
+        defer conn.Close()
+        
+        _, err = conn.Write(append(data, '\n'))
+        return err
+    } else {
+        // ... existing non-TLS connection code ...
+        conn, err := net.DialTimeout("tcp", address, timeout)
+        if err != nil {
+            return err
+        }
+        defer conn.Close()
+        
+        _, err = conn.Write(append(data, '\n'))
+        return err
+    }
+}
+
 func main() {
     commandPtr := flag.String("command", "", "Command.")
     returnCodePtr := flag.String("return-code", "", "Return code.")
@@ -99,7 +164,9 @@ func main() {
     configPtr := flag.String("env-config", "", "Path to environment filtering configuration file.")
     generateConfigPtr := flag.Bool("generate-config", false, "Generate default configuration file and exit.")
     testPtr := flag.Bool("test", false, "Test environment filtering and print results without sending data.")
-    
+    useSocketPtr := flag.Bool("use-socket", false, "Use unix domain socket proxy instead of direct TLS")
+    socketPathPtr := flag.String("socket-path", "/tmp/totalrecall-proxy.sock", "Unix domain socket path")
+     
     timeout, err := time.ParseDuration("3s")
     if err != nil {
 	   fmt.Println("error:", err)
@@ -231,54 +298,26 @@ func main() {
         event["env"] = env
     }
     
-    // Add config version for tracking
-    event["_config_version"] = envConfig.Version
-    
     j, err := json.Marshal(event)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
-    
-    // Connection handling with TLS support
-    address := fmt.Sprintf("%s:%s", *hostPtr, *portPtr)
-    
-    if *enableTLSPtr {
-        // Load CA cert
-        caCert, err := ioutil.ReadFile(*caFilePtr)
-        if err != nil {
-            fmt.Println("error loading CA certificate:", err)
-            return
+
+    // Choose connection method
+    if *useSocketPtr {
+        // Use unix domain socket proxy (fast path)
+        if err := sendViaUnixSocket(j, *socketPathPtr, *timeoutPtr); err != nil {
+            // Fallback to direct TLS if socket proxy is down
+            fmt.Printf("Socket proxy failed, falling back to direct TLS: %v\n", err)
+            sendDirectTLS(j, *hostPtr, *portPtr, *enableTLSPtr, *caFilePtr, *certFilePtr, *keyFilePtr, *timeoutPtr)
         }
-        caCertPool := x509.NewCertPool()
-        caCertPool.AppendCertsFromPEM(caCert)
-        
-        // Load client cert and key
-        cert, err := tls.LoadX509KeyPair(*certFilePtr, *keyFilePtr)
-        if err != nil {
-            fmt.Println("error loading client certificate:", err)
-            return
-        }
-        
-        // Create TLS config
-        tlsConfig := &tls.Config{
-            RootCAs:            caCertPool,
-            Certificates:       []tls.Certificate{cert},
-            InsecureSkipVerify: false,
-        }
-        
-        // Establish TLS connection with timeout
-        dialer := &net.Dialer{Timeout: *timeoutPtr}
-        conn, err := tls.DialWithDialer(dialer, "tcp", address, tlsConfig)
-        if err != nil {
-            fmt.Println("error connecting with TLS:", err)
-            return
-        }
-        
-        fmt.Fprintf(conn, string(j) + "\n")
-        conn.Close()
+    } else if *enableTLSPtr{
+        // Use direct TLS connection (original behavior)
+        sendDirectTLS(j, *hostPtr, *portPtr, *enableTLSPtr, *caFilePtr, *certFilePtr, *keyFilePtr, *timeoutPtr)
     } else {
         // Original non-TLS connection
+        address := fmt.Sprintf("%s:%s", hostPtr, portPtr)
         conn, err := net.DialTimeout("tcp", address, *timeoutPtr)
         if err != nil {
             fmt.Println("error:", err)

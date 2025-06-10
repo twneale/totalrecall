@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+    "io"
 	"os"
 	"os/signal"
 	"strings"
@@ -76,14 +77,22 @@ func (c *PubSubClient) ReadEvent() (*Event, error) {
 	
 	line := strings.TrimSpace(c.scanner.Text())
 	
-	// Skip protocol messages
-	if strings.HasPrefix(line, "SUBSCRIBED") {
+	// Skip empty lines
+	if line == "" {
 		return c.ReadEvent() // Recursively read next event
 	}
 	
+	// Skip protocol messages
+	if strings.HasPrefix(line, "SUBSCRIBED") || strings.HasPrefix(line, "PONG") {
+		return c.ReadEvent() // Recursively read next event
+	}
+	
+	// Debug: log what we're trying to parse
+	log.Printf("Debug: Attempting to parse JSON: %s", line)
+	
 	var event Event
 	if err := json.Unmarshal([]byte(line), &event); err != nil {
-		return nil, fmt.Errorf("failed to parse event: %v", err)
+		return nil, fmt.Errorf("failed to parse event JSON '%s': %v", line, err)
 	}
 	
 	return &event, nil
@@ -294,8 +303,14 @@ func main() {
 		socketPath = flag.String("socket", "/tmp/totalrecall-proxy.sock", "Unix domain socket path")
 		mode       = flag.String("mode", "tui", "Mode: 'tui' for reactive TUI, 'test' for test publisher")
 		maxEvents  = flag.Int("max-events", 20, "Maximum events to display in TUI")
+		debug      = flag.Bool("debug", false, "Enable debug logging")
 	)
 	flag.Parse()
+	
+	// Set up logging
+	if !*debug {
+		log.SetOutput(io.Discard) // Disable debug logs unless explicitly enabled
+	}
 	
 	switch *mode {
 	case "tui":

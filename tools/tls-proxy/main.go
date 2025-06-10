@@ -77,8 +77,11 @@ func (hub *PubSubHub) Publish(eventData []byte) {
 	defer hub.subMutex.RUnlock()
 
 	if len(hub.subscribers) == 0 {
+		log.Printf("Debug: No subscribers to publish to")
 		return
 	}
+
+	log.Printf("Debug: Publishing to %d subscribers: %s", len(hub.subscribers), string(eventData))
 
 	// Parse event to enable filtering
 	var event map[string]interface{}
@@ -103,7 +106,10 @@ func (hub *PubSubHub) Publish(eventData []byte) {
 		subscriber.conn.SetWriteDeadline(time.Time{})
 
 		if err != nil {
+			log.Printf("Debug: Failed to send to subscriber %s: %v", id, err)
 			deadSubs = append(deadSubs, id)
+		} else {
+			log.Printf("Debug: Successfully sent to subscriber %s", id)
 		}
 	}
 
@@ -243,6 +249,16 @@ func (p *TLSProxy) sendToFluentBit(data []byte) error {
 
 // Process incoming data (send to fluent-bit AND publish locally)
 func (p *TLSProxy) processEvent(data []byte) error {
+	// Debug: log what we're processing
+	log.Printf("Debug: Processing event data: %s", string(data))
+	
+	// Validate JSON before processing
+	var testParse map[string]interface{}
+	if err := json.Unmarshal(data, &testParse); err != nil {
+		log.Printf("Warning: Received invalid JSON, skipping: %v", err)
+		return fmt.Errorf("invalid JSON: %v", err)
+	}
+	
 	// Send to fluent-bit (for remote storage)
 	fluentErr := p.sendToFluentBit(data)
 	if fluentErr != nil {
