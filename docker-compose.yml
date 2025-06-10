@@ -96,13 +96,13 @@ services:
     networks: ['totalrecall']
     volumes:
       - ./scripts:/scripts:ro
-      - ${HOME}/.totalrecall:/config:ro
+      - ${HOME}/.totalrecall:/home/curl_user/.totalrecall:ro
     environment:
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - CHECK_INTERVAL=300
     depends_on:
       - elasticsearch
-      - totalrecall-setup
+      - kibana-setup
     command: ["/bin/sh", "/scripts/config-sync-service.sh"]
     restart: unless-stopped
 

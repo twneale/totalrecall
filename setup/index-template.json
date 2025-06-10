@@ -1,4 +1,4 @@
- i{
+{
   "index_patterns": ["totalrecall*"],
   "template": {
     "settings": {
@@ -193,4 +193,4 @@
     "created_by": "total-recall",
     "updated": "2025-01-01"
   }
-}
+}  
