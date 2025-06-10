@@ -1,10 +1,10 @@
 {
-  "version": "8.0.0",
+  "version": "9.0.0",
   "objects": [
     {
       "id": "totalrecall-*",
       "type": "index-pattern",
-      "updated_at": "2025-01-01T00:00:00.000Z",
+      "updated_at": "2025-06-09T00:00:00.000Z",
       "version": "WzEsMV0=",
       "attributes": {
         "title": "totalrecall*",
@@ -17,6 +17,46 @@
       "references": [],
       "migrationVersion": {
         "index-pattern": "7.11.0"
+      }
+    },
+    {
+      "id": "totalrecall-dashboard",
+      "type": "dashboard",
+      "updated_at": "2025-06-09T00:00:00.000Z",
+      "version": "WzIsMV0=",
+      "attributes": {
+        "title": "Total Recall - Command History",
+        "hits": 0,
+        "description": "Overview of shell command history and patterns",
+        "panelsJSON": "[{\"version\":\"9.0.0\",\"type\":\"search\",\"gridData\":{\"x\":0,\"y\":0,\"w\":48,\"h\":20,\"i\":\"command-search\"},\"panelIndex\":\"command-search\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_command-search\"},{\"version\":\"9.0.0\",\"type\":\"histogram\",\"gridData\":{\"x\":0,\"y\":20,\"w\":24,\"h\":15,\"i\":\"commands-over-time\"},\"panelIndex\":\"commands-over-time\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_commands-over-time\"},{\"version\":\"9.0.0\",\"type\":\"pie\",\"gridData\":{\"x\":24,\"y\":20,\"w\":24,\"h\":15,\"i\":\"return-codes\"},\"panelIndex\":\"return-codes\",\"embeddableConfig\":{\"enhancements\":{}},\"panelRefName\":\"panel_return-codes\"}]",
+        "optionsJSON": "{\"useMargins\":true,\"syncColors\":false,\"hidePanelTitles\":false}",
+        "version": 1,
+        "timeRestore": true,
+        "timeTo": "now",
+        "timeFrom": "now-24h",
+        "kibanaSavedObjectMeta": {
+          "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[],\"highlightAll\":true,\"version\":true}"
+        }
+      },
+      "references": [
+        {
+          "name": "panel_command-search",
+          "type": "search",
+          "id": "totalrecall-search"
+        },
+        {
+          "name": "panel_commands-over-time",
+          "type": "visualization",
+          "id": "totalrecall-commands-histogram"
+        },
+        {
+          "name": "panel_return-codes",
+          "type": "visualization",
+          "id": "totalrecall-return-codes-pie"
+        }
+      ],
+      "migrationVersion": {
+        "dashboard": "7.11.0"
       }
     }
   ]

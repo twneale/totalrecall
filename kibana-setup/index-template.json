@@ -1,0 +1,84 @@
+{
+  "index_patterns": ["totalrecall*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "index.refresh_interval": "5s",
+      "index.mapping.ignore_malformed": true,
+      "index.mapping.total_fields.limit": 2000
+    },
+    "mappings": {
+      "dynamic": "true",
+      "dynamic_templates": [
+        {
+          "env_hashed_values": {
+            "path_match": "env.*",
+            "match_pattern": "regex",
+            "match": "^h8_[a-f0-9]{8}$",
+            "mapping": {
+              "type": "keyword",
+              "index": true
+            }
+          }
+        },
+        {
+          "env_strings": {
+            "path_match": "env.*",
+            "mapping": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 256
+                }
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": {
+          "type": "date"
+        },
+        "command": {
+          "type": "text",
+          "fields": {
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 1024
+            }
+          }
+        },
+        "pwd": {
+          "type": "text",
+          "fields": {
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 512
+            }
+          }
+        },
+        "return_code": {
+          "type": "integer"
+        },
+        "start_timestamp": {
+          "type": "date"
+        },
+        "end_timestamp": {
+          "type": "date"
+        },
+        "hostname": {
+          "type": "keyword"
+        },
+        "ip_address": {
+          "type": "ip"
+        }
+      }
+    }
+  },
+  "priority": 100,
+  "_meta": {
+    "description": "Total Recall shell command history index template"
+  }
+}  
