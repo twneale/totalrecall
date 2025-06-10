@@ -74,7 +74,7 @@ services:
       retries: 5
 
   # Setup service to configure Elasticsearch and Kibana
-  totalrecall-setup:
+  kibana-setup:
     image: curlimages/curl:latest
     networks: ['totalrecall']
     volumes:
@@ -91,12 +91,13 @@ services:
     command: ["/bin/sh", "/setup/setup.sh"]
     restart: "no"  # Only run once
 
-  totalrecall-sync:
-    image: curlimages/curl:latest
+  sync-service:
+    build:
+      context: sync-service
     networks: ['totalrecall']
     volumes:
       - ./scripts:/scripts:ro
-      - ${HOME}/.totalrecall:/home/curl_user/.totalrecall:ro
+      - ${HOME}/.totalrecall:/home/syncuser/.totalrecall:ro
     environment:
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - CHECK_INTERVAL=300

@@ -9,11 +9,10 @@ import (
     "net"
     "strings"
     "strconv"
-    "regexp"
-    "crypto/sha256"
     "encoding/json"
     "encoding/base64"
     "io/ioutil"
+    "path/filepath"
 )
 
 func parseTimestamp(t string) time.Time {
