@@ -316,7 +316,6 @@ func isHTTPRequest(line string) bool {
 	}
 	return false
 }
-
 func (p *EnhancedTLSProxy) handleESRequest(clientConn net.Conn, reader *bufio.Reader, firstLine string) {
 	debugLog("Handling HTTP request: %s", firstLine)
 	
@@ -343,6 +342,7 @@ func (p *EnhancedTLSProxy) handleESRequest(clientConn net.Conn, reader *bufio.Re
 		return
 	}
 	
+	// Copy headers
 	for name, values := range httpReq.Header {
 		for _, value := range values {
 			proxyReq.Header.Add(name, value)
@@ -363,9 +363,17 @@ func (p *EnhancedTLSProxy) handleESRequest(clientConn net.Conn, reader *bufio.Re
 	
 	debugLog("Received response from HAProxy: %s", resp.Status)
 	
+	// Set a write deadline to detect if client disconnected
+	clientConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	defer clientConn.SetWriteDeadline(time.Time{}) // Clear deadline
+	
 	err = p.writeHTTPResponse(clientConn, resp)
 	if err != nil {
 		debugLog("Failed to write response to client: %v", err)
+		// Check if it's a broken pipe (client disconnected)
+		if strings.Contains(err.Error(), "broken pipe") {
+			debugLog("Client disconnected before response could be written")
+		}
 		return
 	}
 	
