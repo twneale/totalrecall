@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
-    "io"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,17 +15,38 @@ import (
 	"time"
 )
 
-// Event represents a shell command event
-type Event struct {
-	Command        string                 `json:"command"`
-	ReturnCode     int                    `json:"return_code"`
-	StartTimestamp time.Time              `json:"start_timestamp"`
-	EndTimestamp   time.Time              `json:"end_timestamp"`
-	Pwd            string                 `json:"pwd"`
-	Hostname       string                 `json:"hostname"`
-	IPAddress      string                 `json:"ip_address,omitempty"`
-	Env            map[string]string      `json:"env,omitempty"`
-	ConfigVersion  string                 `json:"_config_version,omitempty"`
+// Enhanced event structure to handle both preexec and precmd
+type EnhancedEvent struct {
+	// Common fields
+	EventType   string `json:"event_type"` // "preexec", "precmd", or regular event
+	CommandID   string `json:"command_id,omitempty"`
+	PubSubOnly  bool   `json:"pubsub_only,omitempty"`
+	
+	// Preexec fields
+	Command        string                 `json:"command,omitempty"`
+	Pwd            string                 `json:"pwd,omitempty"`
+	StartTimestamp *time.Time             `json:"start_timestamp,omitempty"`
+	Environment    map[string]string      `json:"env,omitempty"`
+	
+	// Precmd fields
+	ReturnCode     *int       `json:"return_code,omitempty"`
+	EndTimestamp   *time.Time `json:"end_timestamp,omitempty"`
+	
+	// Legacy fields for backwards compatibility
+	Hostname       string `json:"hostname,omitempty"`
+	IPAddress      string `json:"ip_address,omitempty"`
+}
+
+// CommandState represents the state of a command in the UI
+type CommandState struct {
+	CommandID      string
+	Command        string
+	Pwd            string
+	StartTime      time.Time
+	EndTime        *time.Time
+	ReturnCode     *int
+	Environment    map[string]string
+	Status         string // "pending", "success", "error"
 }
 
 // PubSubClient handles connection to the proxy
@@ -67,7 +88,7 @@ func (c *PubSubClient) Subscribe(subscriberID string, filter string) error {
 	return err
 }
 
-func (c *PubSubClient) ReadEvent() (*Event, error) {
+func (c *PubSubClient) ReadEvent() (*EnhancedEvent, error) {
 	if !c.scanner.Scan() {
 		if err := c.scanner.Err(); err != nil {
 			return nil, err
@@ -90,20 +111,12 @@ func (c *PubSubClient) ReadEvent() (*Event, error) {
 	// Debug: log what we're trying to parse
 	log.Printf("Debug: Attempting to parse JSON: %s", line)
 	
-	var event Event
+	var event EnhancedEvent
 	if err := json.Unmarshal([]byte(line), &event); err != nil {
 		return nil, fmt.Errorf("failed to parse event JSON '%s': %v", line, err)
 	}
 	
 	return &event, nil
-}
-
-func (c *PubSubClient) Ping() error {
-	if c.conn == nil {
-		return fmt.Errorf("not connected")
-	}
-	_, err := c.conn.Write([]byte("PING\n"))
-	return err
 }
 
 func (c *PubSubClient) Close() error {
@@ -114,21 +127,26 @@ func (c *PubSubClient) Close() error {
 	return c.conn.Close()
 }
 
-// Simple reactive TUI that displays recent commands
-type ReactiveTUI struct {
-	client       *PubSubClient
-	recentEvents []*Event
-	maxEvents    int
+// Enhanced reactive TUI that correlates preexec/precmd events
+type EnhancedReactiveTUI struct {
+	client         *PubSubClient
+	commandStates  map[string]*CommandState // keyed by command_id
+	recentCommands []*CommandState          // ordered list for display
+	maxEvents      int
+	recentCorrelations map[string]time.Time   // track recent correlation completions to avoid duplicates
 }
 
-func NewReactiveTUI(socketPath string, maxEvents int) *ReactiveTUI {
-	return &ReactiveTUI{
-		client:    NewPubSubClient(socketPath),
-		maxEvents: maxEvents,
+func NewEnhancedReactiveTUI(socketPath string, maxEvents int) *EnhancedReactiveTUI {
+	return &EnhancedReactiveTUI{
+		client:         NewPubSubClient(socketPath),
+		commandStates:  make(map[string]*CommandState),
+		recentCommands: make([]*CommandState, 0),
+		maxEvents:      maxEvents,
+		recentCorrelations: make(map[string]time.Time),
 	}
 }
 
-func (tui *ReactiveTUI) Start() error {
+func (tui *EnhancedReactiveTUI) Start() error {
 	if err := tui.client.Connect(); err != nil {
 		return err
 	}
@@ -140,8 +158,8 @@ func (tui *ReactiveTUI) Start() error {
 	}
 	
 	fmt.Printf("\033[2J\033[H") // Clear screen
-	fmt.Println("🚀 Total Recall Reactive TUI")
-	fmt.Println("Watching for shell commands...")
+	fmt.Println("🚀 Total Recall Enhanced Reactive TUI")
+	fmt.Println("Real-time command tracking with preexec/precmd correlation")
 	fmt.Println(strings.Repeat("-", 80))
 	
 	// Handle Ctrl+C gracefully
@@ -150,61 +168,184 @@ func (tui *ReactiveTUI) Start() error {
 	
 	go func() {
 		<-sigChan
-		fmt.Printf("\n\n👋 Shutting down TUI...\n")
+		fmt.Printf("\n\n👋 Shutting down Enhanced TUI...\n")
 		tui.client.Close()
 		os.Exit(0)
 	}()
 	
-	// Read and display events
+	// Read and process events
 	for {
 		event, err := tui.client.ReadEvent()
 		if err != nil {
 			return fmt.Errorf("error reading event: %v", err)
 		}
 		
-		tui.addEvent(event)
+		tui.processEvent(event)
 		tui.render()
 	}
 }
 
-func (tui *ReactiveTUI) addEvent(event *Event) {
-	tui.recentEvents = append(tui.recentEvents, event)
-	
-	// Keep only recent events
-	if len(tui.recentEvents) > tui.maxEvents {
-		tui.recentEvents = tui.recentEvents[1:]
+func (tui *EnhancedReactiveTUI) processEvent(event *EnhancedEvent) {
+	switch event.EventType {
+	case "preexec":
+		tui.handlePreexecEvent(event)
+	case "precmd":
+		tui.handlePrecmdEvent(event)
+	default:
+		// Handle legacy events, but avoid duplicates
+		tui.handleLegacyEvent(event)
 	}
 }
 
-func (tui *ReactiveTUI) render() {
-	// Move cursor to top and clear screen content
-	fmt.Printf("\033[H")
-	
-	fmt.Printf("🚀 Total Recall Reactive TUI - %s\n", time.Now().Format("15:04:05"))
-	fmt.Printf("Recent commands (last %d):\n", len(tui.recentEvents))
-	fmt.Println(strings.Repeat("-", 80))
-	
-	if len(tui.recentEvents) == 0 {
-		fmt.Println("No commands yet...")
+func (tui *EnhancedReactiveTUI) handlePreexecEvent(event *EnhancedEvent) {
+	if event.CommandID == "" {
+		log.Printf("Warning: preexec event missing command_id")
 		return
 	}
 	
-	// Display recent events
-	for i, event := range tui.recentEvents {
-		duration := event.EndTimestamp.Sub(event.StartTimestamp)
-		statusIcon := "✅"
-		if event.ReturnCode != 0 {
-			statusIcon = "❌"
+	commandState := &CommandState{
+		CommandID:   event.CommandID,
+		Command:     event.Command,
+		Pwd:         event.Pwd,
+		StartTime:   time.Now(), // Use current time if start time not provided
+		Environment: event.Environment,
+		Status:      "pending",
+	}
+	
+	if event.StartTimestamp != nil {
+		commandState.StartTime = *event.StartTimestamp
+	}
+	
+	// Store and add to recent commands
+	tui.commandStates[event.CommandID] = commandState
+	tui.addCommandToRecent(commandState)
+	
+	log.Printf("📝 Preexec: %s (ID: %s)", event.Command, event.CommandID)
+}
+
+func (tui *EnhancedReactiveTUI) handlePrecmdEvent(event *EnhancedEvent) {
+	if event.CommandID == "" {
+		log.Printf("Warning: precmd event missing command_id")
+		return
+	}
+	
+	commandState, exists := tui.commandStates[event.CommandID]
+	if !exists {
+		log.Printf("Warning: precmd event for unknown command_id: %s", event.CommandID)
+		return
+	}
+	
+	// Update command state with precmd data
+	commandState.ReturnCode = event.ReturnCode
+	if event.EndTimestamp != nil {
+		commandState.EndTime = event.EndTimestamp
+	} else {
+		now := time.Now()
+		commandState.EndTime = &now
+	}
+	
+	// Update status based on return code
+	if event.ReturnCode != nil {
+		if *event.ReturnCode == 0 {
+			commandState.Status = "success"
+		} else {
+			commandState.Status = "error"
+		}
+	}
+	
+	// Mark this correlation as recently completed (to avoid legacy duplicates)
+	commandKey := fmt.Sprintf("%s_%s", commandState.Command, commandState.Pwd)
+	tui.recentCorrelations[commandKey] = time.Now()
+	
+	log.Printf("✅ Precmd: ID %s completed with return code %d", event.CommandID, *event.ReturnCode)
+}
+
+func (tui *EnhancedReactiveTUI) handleLegacyEvent(event *EnhancedEvent) {
+	// Skip legacy events if we recently processed a correlation event for the same command
+	if event.Command != "" && event.Pwd != "" {
+		commandKey := fmt.Sprintf("%s_%s", event.Command, event.Pwd)
+		if recentTime, exists := tui.recentCorrelations[commandKey]; exists {
+			// Only skip if the correlation event completed within the last 3 seconds
+			if time.Since(recentTime) < 3*time.Second {
+				log.Printf("Skipping duplicate legacy event for: %s (recent correlation)", event.Command)
+				return
+			}
+			// Clean up old entries to prevent memory leaks
+			if time.Since(recentTime) > 10*time.Second {
+				delete(tui.recentCorrelations, commandKey)
+			}
+		}
+	}
+	
+	// Handle old-style events that don't have command correlation
+	if event.Command != "" {
+		commandState := &CommandState{
+			CommandID:  fmt.Sprintf("legacy_%d", time.Now().UnixNano()),
+			Command:    event.Command,
+			Pwd:        event.Pwd,
+			StartTime:  time.Now(),
+			Status:     "success", // Assume success for legacy events
 		}
 		
+		if event.ReturnCode != nil {
+			commandState.ReturnCode = event.ReturnCode
+			if *event.ReturnCode != 0 {
+				commandState.Status = "error"
+			}
+		}
+		
+		tui.addCommandToRecent(commandState)
+		log.Printf("📄 Legacy: %s", event.Command)
+	}
+}
+
+func (tui *EnhancedReactiveTUI) addCommandToRecent(commandState *CommandState) {
+	tui.recentCommands = append(tui.recentCommands, commandState)
+	
+	// Keep only recent commands
+	if len(tui.recentCommands) > tui.maxEvents {
+		tui.recentCommands = tui.recentCommands[1:]
+	}
+}
+
+func (tui *EnhancedReactiveTUI) render() {
+	// Move cursor to top and clear screen content
+	fmt.Printf("\033[H")
+	
+	fmt.Printf("🚀 Total Recall Enhanced TUI - %s\n", time.Now().Format("15:04:05"))
+	fmt.Printf("Recent commands (last %d) - Live correlation active:\n", len(tui.recentCommands))
+	fmt.Println(strings.Repeat("-", 80))
+	
+	if len(tui.recentCommands) == 0 {
+		fmt.Println("No commands yet... waiting for shell activity")
+		return
+	}
+	
+	// Display recent commands with status-based coloring (reverse order - most recent first)
+	for i := len(tui.recentCommands) - 1; i >= 0; i-- {
+		cmd := tui.recentCommands[i]
+		
+		duration := ""
+		statusIcon := tui.getStatusIcon(cmd)
+		statusColor := tui.getStatusColor(cmd)
+		
+		if cmd.EndTime != nil {
+			duration = fmt.Sprintf("(%4.0fms)", float64(cmd.EndTime.Sub(cmd.StartTime).Nanoseconds())/1000000)
+		} else {
+			duration = "(running...)"
+		}
+		
+		// Format start time as HH:MM:SS
+		timeStr := cmd.StartTime.Format("15:04:05")
+		
 		// Truncate long commands
-		command := event.Command
-		if len(command) > 50 {
-			command = command[:47] + "..."
+		command := cmd.Command
+		if len(command) > 45 {
+			command = command[:42] + "..."
 		}
 		
 		// Truncate long paths
-		pwd := event.Pwd
+		pwd := cmd.Pwd
 		if len(pwd) > 20 {
 			parts := strings.Split(pwd, "/")
 			if len(parts) > 2 {
@@ -212,93 +353,92 @@ func (tui *ReactiveTUI) render() {
 			}
 		}
 		
-		fmt.Printf("%2d. %s %-50s %20s (%4.0fms)\n", 
-			i+1, statusIcon, command, pwd, float64(duration.Nanoseconds())/1000000)
-	}
-	
-	// Future enhancement suggestions
-	if len(tui.recentEvents) >= 5 {
-		tui.suggestCommands()
+		// Build the display line
+		displayLine := fmt.Sprintf("%s %s %-45s %20s %s", 
+			timeStr, statusIcon, command, pwd, duration)
+		
+		// Add return code if command completed
+		if cmd.ReturnCode != nil {
+			displayLine += fmt.Sprintf(" [%d]", *cmd.ReturnCode)
+		}
+		
+		fmt.Printf("%s%s\033[0m\n", statusColor, displayLine)
 	}
 }
 
-func (tui *ReactiveTUI) suggestCommands() {
-	fmt.Println("\n💡 Suggested commands based on current directory:")
-	
-	if len(tui.recentEvents) == 0 {
-		return
-	}
-	
-	lastEvent := tui.recentEvents[len(tui.recentEvents)-1]
-	currentDir := lastEvent.Pwd
-	
-	// Analyze recent commands in this directory
-	dirCommands := make(map[string]int)
-	for _, event := range tui.recentEvents {
-		if event.Pwd == currentDir && event.ReturnCode == 0 {
-			dirCommands[event.Command]++
-		}
-	}
-	
-	// Simple heuristics for suggestions
-	suggestions := []string{}
-	
-	// Check if it's a git repo
-	if hasGitCommands := false; !hasGitCommands {
-		for cmd := range dirCommands {
-			if strings.Contains(cmd, "git") {
-				hasGitCommands = true
-				break
-			}
-		}
-		if hasGitCommands {
-			suggestions = append(suggestions, "git status", "git log --oneline -10")
-		}
-	}
-	
-	// Check for common development patterns
-	if strings.Contains(currentDir, "src") || strings.Contains(currentDir, "code") {
-		suggestions = append(suggestions, "ls -la", "find . -name '*.go' -o -name '*.py' -o -name '*.js'")
-	}
-	
-	// Show suggestions
-	for i, suggestion := range suggestions {
-		if i >= 3 { // Limit to 3 suggestions
-			break
-		}
-		fmt.Printf("   %d. %s\n", i+1, suggestion)
+func (tui *EnhancedReactiveTUI) getStatusIcon(cmd *CommandState) string {
+	switch cmd.Status {
+	case "pending":
+		return "⏳" // Hourglass for running commands
+	case "success":
+		return "✅" // Green check for successful commands  
+	case "error":
+		return "❌" // Red X for failed commands
+	default:
+		return "❓" // Question mark for unknown status
 	}
 }
 
-// Test client for sending events
-func testPublisher(socketPath string) error {
+func (tui *EnhancedReactiveTUI) getStatusColor(cmd *CommandState) string {
+	switch cmd.Status {
+	case "pending":
+		return "\033[90m"  // Grey for pending
+	case "success":
+		return "\033[92m"  // Bright green for success
+	case "error":
+		return "\033[91m"  // Bright red for error
+	default:
+		return "\033[0m"   // Default color
+	}
+}
+
+// Test client for sending test events
+func testCorrelationPublisher(socketPath string) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 	
-	// Send a test event
-	testEvent := Event{
-		Command:        "echo 'Hello from test publisher'",
-		ReturnCode:     0,
-		StartTimestamp: time.Now().Add(-time.Second),
-		EndTimestamp:   time.Now(),
+	// Send a test preexec event
+	commandID := fmt.Sprintf("test_%d", time.Now().UnixMilli())
+	
+	preexecEvent := EnhancedEvent{
+		EventType:      "preexec",
+		CommandID:      commandID,
+		Command:        "echo 'Testing correlation'",
 		Pwd:            "/tmp",
-		Hostname:       "test-host",
+		StartTimestamp: &[]time.Time{time.Now()}[0],
+		PubSubOnly:     true,
 	}
 	
-	data, _ := json.Marshal(testEvent)
-	_, err = conn.Write(append(data, '\n'))
+	data, _ := json.Marshal(preexecEvent)
+	conn.Write(append(data, '\n'))
 	
-	fmt.Println("Sent test event to proxy")
-	return err
+	fmt.Printf("Sent preexec event: %s\n", commandID)
+	
+	// Wait a bit, then send precmd event
+	time.Sleep(2 * time.Second)
+	
+	precmdEvent := EnhancedEvent{
+		EventType:    "precmd",
+		CommandID:    commandID,
+		ReturnCode:   &[]int{0}[0],
+		EndTimestamp: &[]time.Time{time.Now()}[0],
+		PubSubOnly:   true,
+	}
+	
+	data, _ = json.Marshal(precmdEvent)
+	conn.Write(append(data, '\n'))
+	
+	fmt.Printf("Sent precmd event: %s\n", commandID)
+	return nil
 }
 
 func main() {
 	var (
 		socketPath = flag.String("socket", "/tmp/totalrecall-proxy.sock", "Unix domain socket path")
-		mode       = flag.String("mode", "tui", "Mode: 'tui' for reactive TUI, 'test' for test publisher")
+		mode       = flag.String("mode", "tui", "Mode: 'tui' for reactive TUI, 'test' for correlation test")
 		maxEvents  = flag.Int("max-events", 20, "Maximum events to display in TUI")
 		debug      = flag.Bool("debug", false, "Enable debug logging")
 	)
@@ -311,13 +451,13 @@ func main() {
 	
 	switch *mode {
 	case "tui":
-		tui := NewReactiveTUI(*socketPath, *maxEvents)
+		tui := NewEnhancedReactiveTUI(*socketPath, *maxEvents)
 		if err := tui.Start(); err != nil {
-			log.Fatalf("TUI failed: %v", err)
+			log.Fatalf("Enhanced TUI failed: %v", err)
 		}
 	case "test":
-		if err := testPublisher(*socketPath); err != nil {
-			log.Fatalf("Test publisher failed: %v", err)
+		if err := testCorrelationPublisher(*socketPath); err != nil {
+			log.Fatalf("Correlation test failed: %v", err)
 		}
 	default:
 		fmt.Printf("Usage: %s -mode=[tui|test] [other options]\n", os.Args[0])

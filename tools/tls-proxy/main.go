@@ -443,20 +443,45 @@ func (p *EnhancedTLSProxy) writeHTTPError(conn net.Conn, code int, message strin
 	conn.Write([]byte(response))
 }
 
+
 func (p *EnhancedTLSProxy) processFluentbitEvent(data []byte) error {
 	var testParse map[string]interface{}
 	if err := json.Unmarshal(data, &testParse); err != nil {
-		debugLog("Received invalid JSON for fluent-bit, skipping: %v", err)
+		debugLog("Received invalid JSON, skipping: %v", err)
 		return fmt.Errorf("invalid JSON: %v", err)
 	}
-	
-	debugLog("Processing fluent-bit event: %s", string(data))
-	
+
+	debugLog("Processing event: %s", string(data))
+
+	// Check if this is a pub/sub-only event
+	isPubSubOnly := false
+	if pubsubOnly, exists := testParse["pubsub_only"]; exists {
+		if pubsubOnlyBool, ok := pubsubOnly.(bool); ok && pubsubOnlyBool {
+			isPubSubOnly = true
+		}
+	}
+
+	if isPubSubOnly {
+		debugLog("Processing as pub/sub-only event (not sending to fluent-bit)")
+
+		// Only send to pub/sub subscribers
+		p.pubsub.Publish(data)
+
+		debugLog("Successfully published pub/sub-only event")
+		return nil
+	}
+
+	// Regular event: send to both fluent-bit and pub/sub subscribers
+	debugLog("Processing as regular event (sending to both fluent-bit and pub/sub)")
+
+	// Send to fluent-bit
 	conn, err := p.fluentbitPool.getConnection()
 	if err != nil {
 		p.fluentbitPool.mutex.Lock()
 		p.fluentbitPool.totalErrors++
 		p.fluentbitPool.mutex.Unlock()
+		// Still try to publish to pub/sub even if fluent-bit fails
+		p.pubsub.Publish(data)
 		return err
 	}
 
@@ -471,28 +496,56 @@ func (p *EnhancedTLSProxy) processFluentbitEvent(data []byte) error {
 			p.fluentbitPool.mutex.Unlock()
 		}
 	}()
-	
+
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, err = conn.Write(append(data, '\n'))
 	conn.SetWriteDeadline(time.Time{})
-	
+
 	if err != nil {
 		debugLog("Failed to send to fluent-bit: %v", err)
 		returnConn = false
 		p.fluentbitPool.mutex.Lock()
 		p.fluentbitPool.totalErrors++
 		p.fluentbitPool.mutex.Unlock()
+		// Still publish to pub/sub even if fluent-bit fails
+		p.pubsub.Publish(data)
 		return fmt.Errorf("failed to send data: %v", err)
 	}
 
 	p.fluentbitPool.mutex.Lock()
 	p.fluentbitPool.totalSent++
 	p.fluentbitPool.mutex.Unlock()
-	
+
+	// Send to pub/sub subscribers
 	p.pubsub.Publish(data)
-	
-	debugLog("Successfully sent data to fluent-bit and published locally")
+
+	debugLog("Successfully sent data to fluent-bit and published to pub/sub")
 	return nil
+}
+
+// Add this method to provide better stats for pub/sub-only events
+func (p *EnhancedTLSProxy) printStats(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fbActive, fbPooled, fbSent, fbErrors := p.fluentbitPool.GetStats()
+			subscribers, totalEvents, totalSubs := p.pubsub.GetStats()
+
+			log.Printf("Stats: FB(conns=%d,pooled=%d,sent=%d,err=%d) ES(https_client) PubSub(subs=%d,events=%d,total_subs=%d)",
+				fbActive, fbPooled, fbSent, fbErrors,
+				subscribers, totalEvents, totalSubs)
+
+			// If we have subscribers, that means reactive features are active
+			if subscribers > 0 {
+				log.Printf("🚀 Reactive features active: %d subscriber(s) connected", subscribers)
+			}
+		}
+	}
 }
 
 func (p *EnhancedTLSProxy) handleSubscriber(clientConn net.Conn, subscriberID string, filterStr string) {
@@ -573,25 +626,6 @@ func (p *EnhancedTLSProxy) Start(ctx context.Context) error {
 		}
 
 		go p.handleClient(conn)
-	}
-}
-
-func (p *EnhancedTLSProxy) printStats(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fbActive, fbPooled, fbSent, fbErrors := p.fluentbitPool.GetStats()
-			subscribers, totalEvents, totalSubs := p.pubsub.GetStats()
-
-			log.Printf("Stats: FB(conns=%d,pooled=%d,sent=%d,err=%d) ES(https_client) PubSub(subs=%d,events=%d,total_subs=%d)",
-				fbActive, fbPooled, fbSent, fbErrors,
-				subscribers, totalEvents, totalSubs)
-		}
 	}
 }
 
