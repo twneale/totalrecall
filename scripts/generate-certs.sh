@@ -20,6 +20,7 @@ subjectAltName = @alt_names
 IP.1 = 127.0.0.1
 DNS.1 = localhost
 DNS.2 = fluentbit
+DNS.3 = haproxy
 EOF
 
 # Create the CA certificate

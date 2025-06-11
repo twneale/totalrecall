@@ -2,15 +2,18 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -31,7 +34,7 @@ type Subscriber struct {
 	id     string
 	conn   net.Conn
 	writer *bufio.Writer
-	filter map[string]string // Optional filters for events
+	filter map[string]string
 }
 
 type PubSubHub struct {
@@ -51,7 +54,6 @@ func (hub *PubSubHub) Subscribe(id string, conn net.Conn, filter map[string]stri
 	hub.subMutex.Lock()
 	defer hub.subMutex.Unlock()
 
-	// Close existing subscription if it exists
 	if existing, exists := hub.subscribers[id]; exists {
 		existing.conn.Close()
 	}
@@ -91,19 +93,16 @@ func (hub *PubSubHub) Publish(eventData []byte) {
 
 	debugLog("Publishing to %d subscribers: %s", len(hub.subscribers), string(eventData))
 
-	// Parse event to enable filtering
 	var event map[string]interface{}
 	json.Unmarshal(eventData, &event)
 
 	deadSubs := []string{}
 
 	for id, subscriber := range hub.subscribers {
-		// Apply filters if any
 		if !hub.matchesFilter(event, subscriber.filter) {
 			continue
 		}
 
-		// Send event with timeout
 		subscriber.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 		
 		_, err := subscriber.writer.Write(append(eventData, '\n'))
@@ -121,7 +120,6 @@ func (hub *PubSubHub) Publish(eventData []byte) {
 		}
 	}
 
-	// Clean up dead subscribers
 	for _, id := range deadSubs {
 		hub.Unsubscribe(id)
 	}
@@ -131,7 +129,7 @@ func (hub *PubSubHub) Publish(eventData []byte) {
 
 func (hub *PubSubHub) matchesFilter(event map[string]interface{}, filter map[string]string) bool {
 	if len(filter) == 0 {
-		return true // No filter means match all
+		return true
 	}
 
 	for key, expectedValue := range filter {
@@ -151,143 +149,347 @@ func (hub *PubSubHub) GetStats() (int, int64, int64) {
 	return len(hub.subscribers), hub.totalEvents, hub.totalSubs
 }
 
-type TLSProxy struct {
-	socketPath   string
-	targetAddr   string
-	tlsConfig    *tls.Config
-	poolSize     int
-	connections  chan *tls.Conn
-	connMutex    sync.RWMutex
-	activeConns  int
-	totalSent    int64
-	totalErrors  int64
-	pubsub       *PubSubHub
-	listener     net.Listener
+type ConnectionPool struct {
+	connections chan *tls.Conn
+	targetAddr  string
+	tlsConfig   *tls.Config
+	poolSize    int
+	activeConns int
+	totalSent   int64
+	totalErrors int64
+	mutex       sync.RWMutex
 }
 
-func NewTLSProxy(socketPath, targetAddr string, tlsConfig *tls.Config, poolSize int) *TLSProxy {
-	return &TLSProxy{
-		socketPath:  socketPath,
+func NewConnectionPool(targetAddr string, tlsConfig *tls.Config, poolSize int) *ConnectionPool {
+	return &ConnectionPool{
+		connections: make(chan *tls.Conn, poolSize),
 		targetAddr:  targetAddr,
 		tlsConfig:   tlsConfig,
 		poolSize:    poolSize,
-		connections: make(chan *tls.Conn, poolSize),
-		pubsub:      NewPubSubHub(),
 	}
 }
 
-// Get a connection from the pool or create a new one
-func (p *TLSProxy) getConnection() (*tls.Conn, error) {
+func (pool *ConnectionPool) getConnection() (*tls.Conn, error) {
 	select {
-	case conn := <-p.connections:
-		// Test if connection is still alive
+	case conn := <-pool.connections:
 		conn.SetDeadline(time.Now().Add(100 * time.Millisecond))
-		_, err := conn.Write([]byte{}) // Empty write to test connection
-		conn.SetDeadline(time.Time{})  // Clear deadline
+		_, err := conn.Write([]byte{})
+		conn.SetDeadline(time.Time{})
 		
 		if err != nil {
-			// Connection is dead, close it and create a new one
 			conn.Close()
-			p.connMutex.Lock()
-			p.activeConns--
-			p.connMutex.Unlock()
+			pool.mutex.Lock()
+			pool.activeConns--
+			pool.mutex.Unlock()
 		} else {
 			return conn, nil
 		}
 	default:
-		// No connection available in pool
 	}
 
-	// Create new connection
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", p.targetAddr, p.tlsConfig)
+	conn, err := tls.DialWithDialer(dialer, "tcp", pool.targetAddr, pool.tlsConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create TLS connection: %v", err)
+		pool.mutex.Lock()
+		pool.totalErrors++
+		pool.mutex.Unlock()
+		return nil, fmt.Errorf("failed to create TLS connection to %s: %v", pool.targetAddr, err)
 	}
 
-	p.connMutex.Lock()
-	p.activeConns++
-	p.connMutex.Unlock()
+	pool.mutex.Lock()
+	pool.activeConns++
+	pool.mutex.Unlock()
 
-	debugLog("Created new TLS connection (active: %d)", p.activeConns)
+	debugLog("Created new TLS connection to %s (active: %d)", pool.targetAddr, pool.activeConns)
 	return conn, nil
 }
 
-// Return a connection to the pool
-func (p *TLSProxy) returnConnection(conn *tls.Conn) {
+func (pool *ConnectionPool) returnConnection(conn *tls.Conn) {
 	select {
-	case p.connections <- conn:
-		debugLog("Returned connection to pool")
+	case pool.connections <- conn:
+		debugLog("Returned connection to %s pool", pool.targetAddr)
 	default:
-		// Pool is full, close the connection
 		conn.Close()
-		p.connMutex.Lock()
-		p.activeConns--
-		p.connMutex.Unlock()
-		debugLog("Pool full, closed connection (active: %d)", p.activeConns)
+		pool.mutex.Lock()
+		pool.activeConns--
+		pool.mutex.Unlock()
+		debugLog("Pool full for %s, closed connection (active: %d)", pool.targetAddr, pool.activeConns)
 	}
 }
 
-// Send data to fluent-bit
-func (p *TLSProxy) sendToFluentBit(data []byte) error {
-	conn, err := p.getConnection()
+func (pool *ConnectionPool) GetStats() (int, int, int64, int64) {
+	pool.mutex.RLock()
+	defer pool.mutex.RUnlock()
+	return pool.activeConns, len(pool.connections), pool.totalSent, pool.totalErrors
+}
+
+type EnhancedTLSProxy struct {
+	socketPath     string
+	fluentbitPool  *ConnectionPool
+	esHTTPClient   *http.Client
+	esBaseURL      string
+	pubsub         *PubSubHub
+	listener       net.Listener
+}
+
+func NewEnhancedTLSProxy(socketPath string, 
+	fluentbitAddr, esAddr string,
+	fluentbitTLS, esTLS *tls.Config,
+	poolSize int) *EnhancedTLSProxy {
+	
+	esHTTPClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: esTLS,
+		},
+		Timeout: 30 * time.Second,
+	}
+	
+	return &EnhancedTLSProxy{
+		socketPath:    socketPath,
+		fluentbitPool: NewConnectionPool(fluentbitAddr, fluentbitTLS, poolSize),
+		esHTTPClient:  esHTTPClient,
+		esBaseURL:     fmt.Sprintf("https://%s", esAddr),
+		pubsub:        NewPubSubHub(),
+	}
+}
+
+func (p *EnhancedTLSProxy) handleClient(clientConn net.Conn) {
+	defer clientConn.Close()
+
+	reader := bufio.NewReader(clientConn)
+	
+	firstLine, err := reader.ReadString('\n')
 	if err != nil {
-		p.totalErrors++
+		debugLog("Failed to read first line: %v", err)
+		return
+	}
+
+	firstLine = strings.TrimSpace(firstLine)
+	debugLog("Received first line: %s", firstLine)
+
+	switch {
+	case isHTTPRequest(firstLine):
+		debugLog("Handling as HTTP request for Elasticsearch")
+		p.handleESRequest(clientConn, reader, firstLine)
+		
+	case strings.HasPrefix(firstLine, "SUBSCRIBE"):
+		debugLog("Handling as pub/sub subscription")
+		parts := strings.Fields(firstLine)
+		subscriberID := "anonymous"
+		filterStr := ""
+		
+		if len(parts) >= 2 {
+			subscriberID = parts[1]
+		}
+		if len(parts) >= 3 {
+			filterStr = strings.Join(parts[2:], " ")
+		}
+		
+		p.handleSubscriber(clientConn, subscriberID, filterStr)
+		
+	default:
+		debugLog("Handling as fluent-bit JSON event")
+		if err := p.processFluentbitEvent([]byte(firstLine)); err != nil {
+			debugLog("Failed to process fluent-bit event: %v", err)
+		}
+		
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			
+			if err := p.processFluentbitEvent(line); err != nil {
+				debugLog("Failed to process fluent-bit event: %v", err)
+			}
+		}
+	}
+}
+
+func isHTTPRequest(line string) bool {
+	methods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH "}
+	for _, method := range methods {
+		if strings.HasPrefix(line, method) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *EnhancedTLSProxy) handleESRequest(clientConn net.Conn, reader *bufio.Reader, firstLine string) {
+	debugLog("Handling HTTP request: %s", firstLine)
+	
+	httpReq, err := p.parseHTTPRequest(firstLine, reader)
+	if err != nil {
+		debugLog("Failed to parse HTTP request: %v", err)
+		p.writeHTTPError(clientConn, 400, fmt.Sprintf("Bad request: %v", err))
+		return
+	}
+	
+	debugLog("Parsed HTTP request: %s %s", httpReq.Method, httpReq.URL.Path)
+	
+	targetURL := p.esBaseURL + httpReq.URL.Path
+	if httpReq.URL.RawQuery != "" {
+		targetURL += "?" + httpReq.URL.RawQuery
+	}
+	
+	debugLog("Making HTTPS request to HAProxy: %s %s", httpReq.Method, targetURL)
+	
+	proxyReq, err := http.NewRequest(httpReq.Method, targetURL, httpReq.Body)
+	if err != nil {
+		debugLog("Failed to create proxy request: %v", err)
+		p.writeHTTPError(clientConn, 500, "Failed to create request")
+		return
+	}
+	
+	for name, values := range httpReq.Header {
+		for _, value := range values {
+			proxyReq.Header.Add(name, value)
+		}
+	}
+	
+	proxyReq.Host = "elasticsearch"
+	
+	debugLog("Sending mTLS request to HAProxy...")
+	
+	resp, err := p.esHTTPClient.Do(proxyReq)
+	if err != nil {
+		debugLog("Failed to make mTLS request to HAProxy: %v", err)
+		p.writeHTTPError(clientConn, 502, fmt.Sprintf("ES request failed: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+	
+	debugLog("Received response from HAProxy: %s", resp.Status)
+	
+	err = p.writeHTTPResponse(clientConn, resp)
+	if err != nil {
+		debugLog("Failed to write response to client: %v", err)
+		return
+	}
+	
+	debugLog("HTTP request completed successfully")
+}
+
+func (p *EnhancedTLSProxy) parseHTTPRequest(firstLine string, reader *bufio.Reader) (*http.Request, error) {
+	var requestData bytes.Buffer
+	requestData.WriteString(firstLine + "\r\n")
+	
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request: %v", err)
+		}
+		
+		requestData.WriteString(line)
+		
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	
+	req, err := http.ReadRequest(bufio.NewReader(&requestData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse HTTP request: %v", err)
+	}
+	
+	if req.ContentLength > 0 {
+		body := make([]byte, req.ContentLength)
+		_, err := io.ReadFull(reader, body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request body: %v", err)
+		}
+		req.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	
+	return req, nil
+}
+
+func (p *EnhancedTLSProxy) writeHTTPResponse(clientConn net.Conn, resp *http.Response) error {
+	statusLine := fmt.Sprintf("HTTP/1.1 %s\r\n", resp.Status)
+	if _, err := clientConn.Write([]byte(statusLine)); err != nil {
 		return err
 	}
-
-	// Set write deadline to avoid hanging
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	
-	// Send data
-	_, err = conn.Write(append(data, '\n'))
-	conn.SetWriteDeadline(time.Time{}) // Clear deadline
-	
-	if err != nil {
-		// Connection failed, close it
-		conn.Close()
-		p.connMutex.Lock()
-		p.activeConns--
-		p.connMutex.Unlock()
-		p.totalErrors++
-		return fmt.Errorf("failed to send data: %v", err)
+	for name, values := range resp.Header {
+		for _, value := range values {
+			headerLine := fmt.Sprintf("%s: %s\r\n", name, value)
+			if _, err := clientConn.Write([]byte(headerLine)); err != nil {
+				return err
+			}
+		}
 	}
-
-	p.totalSent++
-	p.returnConnection(conn)
-	debugLog("Successfully sent data to fluent-bit")
-	return nil
+	
+	if _, err := clientConn.Write([]byte("\r\n")); err != nil {
+		return err
+	}
+	
+	_, err := io.Copy(clientConn, resp.Body)
+	return err
 }
 
-// Process incoming data (send to fluent-bit AND publish locally)
-func (p *TLSProxy) processEvent(data []byte) error {
-	// Validate JSON before processing
+func (p *EnhancedTLSProxy) writeHTTPError(conn net.Conn, code int, message string) {
+	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s",
+		code, http.StatusText(code), len(message), message)
+	conn.Write([]byte(response))
+}
+
+func (p *EnhancedTLSProxy) processFluentbitEvent(data []byte) error {
 	var testParse map[string]interface{}
 	if err := json.Unmarshal(data, &testParse); err != nil {
-		debugLog("Received invalid JSON, skipping: %v", err)
+		debugLog("Received invalid JSON for fluent-bit, skipping: %v", err)
 		return fmt.Errorf("invalid JSON: %v", err)
 	}
 	
-	debugLog("Processing event: %s", string(data))
+	debugLog("Processing fluent-bit event: %s", string(data))
 	
-	// Send to fluent-bit (for remote storage)
-	fluentErr := p.sendToFluentBit(data)
-	if fluentErr != nil {
-		debugLog("Failed to send to fluent-bit: %v", fluentErr)
-		// Don't return error - local pub/sub can still work
+	conn, err := p.fluentbitPool.getConnection()
+	if err != nil {
+		p.fluentbitPool.mutex.Lock()
+		p.fluentbitPool.totalErrors++
+		p.fluentbitPool.mutex.Unlock()
+		return err
 	}
 
-	// Publish to local subscribers (for reactive TUI)
-	p.pubsub.Publish(data)
+	var returnConn bool = true
+	defer func() {
+		if returnConn {
+			p.fluentbitPool.returnConnection(conn)
+		} else {
+			conn.Close()
+			p.fluentbitPool.mutex.Lock()
+			p.fluentbitPool.activeConns--
+			p.fluentbitPool.mutex.Unlock()
+		}
+	}()
+	
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err = conn.Write(append(data, '\n'))
+	conn.SetWriteDeadline(time.Time{})
+	
+	if err != nil {
+		debugLog("Failed to send to fluent-bit: %v", err)
+		returnConn = false
+		p.fluentbitPool.mutex.Lock()
+		p.fluentbitPool.totalErrors++
+		p.fluentbitPool.mutex.Unlock()
+		return fmt.Errorf("failed to send data: %v", err)
+	}
 
-	return fluentErr // Return fluent-bit error for statistics
+	p.fluentbitPool.mutex.Lock()
+	p.fluentbitPool.totalSent++
+	p.fluentbitPool.mutex.Unlock()
+	
+	p.pubsub.Publish(data)
+	
+	debugLog("Successfully sent data to fluent-bit and published locally")
+	return nil
 }
 
-// Handle subscription protocol
-func (p *TLSProxy) handleSubscriber(clientConn net.Conn, subscriberID string, filterStr string) {
+func (p *EnhancedTLSProxy) handleSubscriber(clientConn net.Conn, subscriberID string, filterStr string) {
 	defer clientConn.Close()
 
-	// Parse filter
 	filter := make(map[string]string)
 	if filterStr != "" {
 		pairs := strings.Split(filterStr, ",")
@@ -298,14 +500,11 @@ func (p *TLSProxy) handleSubscriber(clientConn net.Conn, subscriberID string, fi
 		}
 	}
 
-	// Register subscriber
 	p.pubsub.Subscribe(subscriberID, clientConn, filter)
 	defer p.pubsub.Unsubscribe(subscriberID)
 
-	// Send confirmation
 	clientConn.Write([]byte(fmt.Sprintf("SUBSCRIBED %s\n", subscriberID)))
 
-	// Keep connection alive and handle ping/pong
 	scanner := bufio.NewScanner(clientConn)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -317,110 +516,45 @@ func (p *TLSProxy) handleSubscriber(clientConn net.Conn, subscriberID string, fi
 	}
 }
 
-// Handle a client connection (publisher or subscriber)
-func (p *TLSProxy) handleClient(clientConn net.Conn) {
-	defer clientConn.Close()
-
-	reader := bufio.NewReader(clientConn)
-	
-	// Read first line to determine if it's a subscriber or publisher
-	firstLine, err := reader.ReadString('\n')
-	if err != nil {
-		return
-	}
-
-	firstLine = strings.TrimSpace(firstLine)
-
-	// Check if it's a subscription request
-	if strings.HasPrefix(firstLine, "SUBSCRIBE") {
-		parts := strings.Fields(firstLine)
-		subscriberID := "anonymous"
-		filterStr := ""
-
-		if len(parts) >= 2 {
-			subscriberID = parts[1]
-		}
-		if len(parts) >= 3 {
-			filterStr = strings.Join(parts[2:], " ")
-		}
-
-		debugLog("Handling subscriber: %s with filter: %s", subscriberID, filterStr)
-		p.handleSubscriber(clientConn, subscriberID, filterStr)
-		return
-	}
-
-	// Otherwise, treat as publisher - process the first line as an event
-	if err := p.processEvent([]byte(firstLine)); err != nil {
-		debugLog("Failed to process event: %v", err)
-	}
-
-	// Continue reading more events from this publisher
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		if err := p.processEvent(line); err != nil {
-			debugLog("Failed to process event: %v", err)
-			// Don't break the connection on send errors
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		debugLog("Error reading from client: %v", err)
-	}
-}
-
-// Start the proxy server
-func (p *TLSProxy) Start(ctx context.Context) error {
-	// Remove existing socket if it exists
+func (p *EnhancedTLSProxy) Start(ctx context.Context) error {
 	if err := os.RemoveAll(p.socketPath); err != nil {
 		return fmt.Errorf("failed to remove existing socket: %v", err)
 	}
 
-	// Create unix domain socket
 	listener, err := net.Listen("unix", p.socketPath)
 	if err != nil {
 		return fmt.Errorf("failed to create unix socket: %v", err)
 	}
 	
-	// Store listener reference for cleanup
 	p.listener = listener
 
-	// Set socket permissions to be writable by owner only for security
 	if err := os.Chmod(p.socketPath, 0600); err != nil {
 		log.Printf("Warning: failed to set socket permissions: %v", err)
 	}
 
-	log.Printf("TLS proxy listening on %s", p.socketPath)
-	log.Printf("Forwarding to fluent-bit: %s", p.targetAddr)
+	log.Printf("Enhanced TLS proxy listening on %s", p.socketPath)
+	log.Printf("Fluent-bit target: %s", p.fluentbitPool.targetAddr)
+	log.Printf("Elasticsearch target: %s (mTLS)", p.esBaseURL)
 	if debugMode {
 		log.Printf("Debug mode enabled")
 	}
 
-	// Start statistics goroutine
 	go p.printStats(ctx)
 
-	// Start goroutine to handle context cancellation
 	go func() {
 		<-ctx.Done()
 		debugLog("Context cancelled, closing listener")
 		listener.Close()
 	}()
 
-	// Accept connections
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			// Check if we're shutting down
 			select {
 			case <-ctx.Done():
 				debugLog("Shutting down due to context cancellation")
 				return ctx.Err()
 			default:
-				// Check if error is due to listener being closed
 				if ne, ok := err.(*net.OpError); ok && ne.Op == "accept" {
 					debugLog("Listener closed, shutting down")
 					return nil
@@ -434,8 +568,7 @@ func (p *TLSProxy) Start(ctx context.Context) error {
 	}
 }
 
-// Print statistics periodically
-func (p *TLSProxy) printStats(ctx context.Context) {
+func (p *EnhancedTLSProxy) printStats(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -444,41 +577,32 @@ func (p *TLSProxy) printStats(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.connMutex.RLock()
-			activeConns := p.activeConns
-			pooledConns := len(p.connections)
-			totalSent := p.totalSent
-			totalErrors := p.totalErrors
-			p.connMutex.RUnlock()
-
+			fbActive, fbPooled, fbSent, fbErrors := p.fluentbitPool.GetStats()
 			subscribers, totalEvents, totalSubs := p.pubsub.GetStats()
 
-			log.Printf("Stats: tls_conns=%d, pooled=%d, sent=%d, errors=%d, subscribers=%d, events=%d, total_subs=%d",
-				activeConns, pooledConns, totalSent, totalErrors, subscribers, totalEvents, totalSubs)
+			log.Printf("Stats: FB(conns=%d,pooled=%d,sent=%d,err=%d) ES(https_client) PubSub(subs=%d,events=%d,total_subs=%d)",
+				fbActive, fbPooled, fbSent, fbErrors,
+				subscribers, totalEvents, totalSubs)
 		}
 	}
 }
 
-// Close all connections and cleanup
-func (p *TLSProxy) Close() {
-	debugLog("Closing TLS proxy...")
+func (p *EnhancedTLSProxy) Close() {
+	debugLog("Closing enhanced TLS proxy...")
 	
-	// Close the listener if it exists
 	if p.listener != nil {
 		p.listener.Close()
 	}
 	
-	// Close connection pool
-	close(p.connections)
-	for conn := range p.connections {
+	close(p.fluentbitPool.connections)
+	for conn := range p.fluentbitPool.connections {
 		conn.Close()
 	}
 	
-	debugLog("TLS proxy closed")
+	debugLog("Enhanced TLS proxy closed")
 }
 
 func loadTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
-	// Load CA cert
 	caCert, err := ioutil.ReadFile(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load CA certificate: %v", err)
@@ -489,7 +613,6 @@ func loadTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to parse CA certificate")
 	}
 
-	// Load client cert and key
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load client certificate: %v", err)
@@ -498,58 +621,79 @@ func loadTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
 	return &tls.Config{
 		RootCAs:      caCertPool,
 		Certificates: []tls.Certificate{cert},
-		ServerName:   "fluentbit", // Should match the certificate
+		ServerName:   "haproxy",
+		MinVersion:   tls.VersionTLS12,
 	}, nil
 }
 
 func main() {
 	var (
 		socketPath = flag.String("socket", "/tmp/totalrecall-proxy.sock", "Unix domain socket path")
-		targetHost = flag.String("host", "127.0.0.1", "Fluent-bit host")
-		targetPort = flag.String("port", "5170", "Fluent-bit port")
-		poolSize   = flag.Int("pool-size", 3, "TLS connection pool size")
-		caFile     = flag.String("ca-file", "certs/ca.crt", "CA certificate file")
-		certFile   = flag.String("cert-file", "certs/client.crt", "Client certificate file")
-		keyFile    = flag.String("key-file", "certs/client.key", "Client key file")
-		debug      = flag.Bool("debug", false, "Enable debug logging")
+		
+		fluentbitHost = flag.String("fluent-host", "127.0.0.1", "Fluent-bit host")
+		fluentbitPort = flag.String("fluent-port", "5170", "Fluent-bit port")
+		
+		esHost = flag.String("es-host", "127.0.0.1", "Elasticsearch host")
+		esPort = flag.String("es-port", "9243", "Elasticsearch port (via HAProxy)")
+		
+		poolSize = flag.Int("pool-size", 3, "TLS connection pool size per target")
+		
+		caFile   = flag.String("ca-file", "certs/ca.crt", "CA certificate file")
+		certFile = flag.String("cert-file", "certs/client.crt", "Client certificate file")
+		keyFile  = flag.String("key-file", "certs/client.key", "Client key file")
+		
+		esCaFile   = flag.String("es-ca-file", "", "ES CA certificate file (defaults to ca-file)")
+		esCertFile = flag.String("es-cert-file", "", "ES client certificate file (defaults to cert-file)")
+		esKeyFile  = flag.String("es-key-file", "", "ES client key file (defaults to key-file)")
+		
+		debug = flag.Bool("debug", false, "Enable debug logging")
 	)
 	flag.Parse()
 
-	// Set debug mode from flag
 	debugMode = *debug
 
-	// Load TLS configuration
-	tlsConfig, err := loadTLSConfig(*caFile, *certFile, *keyFile)
-	if err != nil {
-		log.Fatalf("Failed to load TLS config: %v", err)
+	if *esCaFile == "" {
+		*esCaFile = *caFile
+	}
+	if *esCertFile == "" {
+		*esCertFile = *certFile
+	}
+	if *esKeyFile == "" {
+		*esKeyFile = *keyFile
 	}
 
-	// Create proxy
-	targetAddr := fmt.Sprintf("%s:%s", *targetHost, *targetPort)
-	proxy := NewTLSProxy(*socketPath, targetAddr, tlsConfig, *poolSize)
+	fluentbitTLS, err := loadTLSConfig(*caFile, *certFile, *keyFile)
+	if err != nil {
+		log.Fatalf("Failed to load fluent-bit TLS config: %v", err)
+	}
 
-	// Create cancellable context
+	esTLS, err := loadTLSConfig(*esCaFile, *esCertFile, *esKeyFile)
+	if err != nil {
+		log.Fatalf("Failed to load elasticsearch TLS config: %v", err)
+	}
+
+	fluentbitAddr := fmt.Sprintf("%s:%s", *fluentbitHost, *fluentbitPort)
+	esAddr := fmt.Sprintf("%s:%s", *esHost, *esPort)
+	
+	proxy := NewEnhancedTLSProxy(*socketPath, fluentbitAddr, esAddr, fluentbitTLS, esTLS, *poolSize)
+
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Handle shutdown signals gracefully
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
-	// Start signal handler in goroutine
 	go func() {
 		sig := <-sigChan
 		log.Printf("Received signal %v, shutting down...", sig)
-		cancel() // Cancel context to stop all operations
+		cancel()
 	}()
 
-	// Start proxy (this will block until context is cancelled)
 	err = proxy.Start(ctx)
 	if err != nil && err != context.Canceled {
 		log.Printf("Proxy error: %v", err)
 	}
 
-	// Cleanup
 	proxy.Close()
 	os.Remove(*socketPath)
-	log.Println("Proxy shutdown complete")
+	log.Println("Enhanced proxy shutdown complete")
 }

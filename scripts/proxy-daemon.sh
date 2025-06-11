@@ -1,5 +1,5 @@
 #!/bin/bash
-# scripts/proxy-daemon.sh - Manage the TLS proxy daemon
+# scripts/proxy-daemon.sh - Manage the enhanced TLS proxy daemon
 
 set -e
 
@@ -11,8 +11,10 @@ PID_FILE="/tmp/totalrecall-proxy.pid"
 LOG_FILE="$HOME/.totalrecall/proxy.log"
 
 # Configuration (can be overridden by environment variables)
-PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
-PROXY_PORT="${PROXY_PORT:-5170}"
+FLUENT_HOST="${FLUENT_HOST:-127.0.0.1}"
+FLUENT_PORT="${FLUENT_PORT:-5170}"
+ES_HOST="${ES_HOST:-127.0.0.1}"
+ES_PORT="${ES_PORT:-9243}"  # HAProxy mTLS port
 PROXY_POOL_SIZE="${PROXY_POOL_SIZE:-3}"
 PROXY_DEBUG="${PROXY_DEBUG:-false}"
 
@@ -21,37 +23,48 @@ CA_FILE="${CA_FILE:-$HOME/.totalrecall/ca.crt}"
 CERT_FILE="${CERT_FILE:-$HOME/.totalrecall/client.crt}"
 KEY_FILE="${KEY_FILE:-$HOME/.totalrecall/client.key}"
 
+# Elasticsearch-specific certificates (optional, defaults to main certs)
+ES_CA_FILE="${ES_CA_FILE:-}"
+ES_CERT_FILE="${ES_CERT_FILE:-}"
+ES_KEY_FILE="${ES_KEY_FILE:-}"
+
 usage() {
     cat << EOF
 Usage: $0 {start|stop|restart|status|logs}
 
 Commands:
-    start       Start the TLS proxy daemon
-    stop        Stop the TLS proxy daemon
-    restart     Restart the TLS proxy daemon
+    start       Start the enhanced TLS proxy daemon
+    stop        Stop the enhanced TLS proxy daemon
+    restart     Restart the enhanced TLS proxy daemon
     status      Show proxy status
     logs        Show recent proxy logs
 
 Environment Variables:
-    PROXY_HOST      Target host (default: 127.0.0.1)
-    PROXY_PORT      Target port (default: 5170)
-    PROXY_POOL_SIZE Connection pool size (default: 3)
+    FLUENT_HOST     Fluent-bit host (default: 127.0.0.1)
+    FLUENT_PORT     Fluent-bit port (default: 5170)
+    ES_HOST         Elasticsearch host (default: 127.0.0.1)
+    ES_PORT         Elasticsearch port via HAProxy (default: 9243)
+    PROXY_POOL_SIZE Connection pool size per target (default: 3)
     PROXY_DEBUG     Enable debug logging (default: false)
     CA_FILE         CA certificate file
     CERT_FILE       Client certificate file
     KEY_FILE        Client key file
+    ES_CA_FILE      ES-specific CA certificate (optional)
+    ES_CERT_FILE    ES-specific client certificate (optional)
+    ES_KEY_FILE     ES-specific client key (optional)
 
 Examples:
-    $0 start                    # Start with defaults
-    PROXY_DEBUG=true $0 start   # Start with debug logging
-    $0 logs                     # View recent logs
+    $0 start                           # Start with defaults
+    PROXY_DEBUG=true $0 start          # Start with debug logging
+    ES_HOST=remote-es.com $0 start     # Use remote Elasticsearch
+    $0 logs                            # View recent logs
 EOF
 }
 
-# Check if proxy binary exists
+# Check if enhanced proxy binary exists
 check_binary() {
     if [[ ! -f "$PROXY_BINARY" ]]; then
-        echo "❌ Proxy binary not found: $PROXY_BINARY"
+        echo "❌ Enhanced proxy binary not found: $PROXY_BINARY"
         echo "Build it first: cd tools/tls-proxy && go build -o ../../bin/tls-proxy"
         exit 1
     fi
@@ -93,9 +106,9 @@ get_pid() {
     return 1
 }
 
-# Start the proxy daemon
+# Start the enhanced proxy daemon
 start_proxy() {
-    echo "🚀 Starting TLS proxy daemon..."
+    echo "🚀 Starting enhanced TLS proxy daemon..."
     
     # Check prerequisites
     check_binary
@@ -113,13 +126,26 @@ start_proxy() {
     # Build command line arguments
     local args=(
         "--socket=$SOCKET_PATH"
-        "--host=$PROXY_HOST"
-        "--port=$PROXY_PORT"
+        "--fluent-host=$FLUENT_HOST"
+        "--fluent-port=$FLUENT_PORT"
+        "--es-host=$ES_HOST"
+        "--es-port=$ES_PORT"
         "--pool-size=$PROXY_POOL_SIZE"
         "--ca-file=$CA_FILE"
         "--cert-file=$CERT_FILE"
         "--key-file=$KEY_FILE"
     )
+    
+    # Add ES-specific certificates if provided
+    if [[ -n "$ES_CA_FILE" ]]; then
+        args+=("--es-ca-file=$ES_CA_FILE")
+    fi
+    if [[ -n "$ES_CERT_FILE" ]]; then
+        args+=("--es-cert-file=$ES_CERT_FILE")
+    fi
+    if [[ -n "$ES_KEY_FILE" ]]; then
+        args+=("--es-key-file=$ES_KEY_FILE")
+    fi
     
     # Add debug flag if enabled
     if [[ "$PROXY_DEBUG" == "true" ]]; then
@@ -128,7 +154,7 @@ start_proxy() {
     fi
     
     # Start the proxy in background
-    echo "Starting proxy with args: ${args[*]}"
+    echo "Starting enhanced proxy with args: ${args[*]}"
     nohup "$PROXY_BINARY" "${args[@]}" > "$LOG_FILE" 2>&1 &
     local pid=$!
     
@@ -139,8 +165,10 @@ start_proxy() {
     sleep 2
     
     if kill -0 "$pid" 2>/dev/null; then
-        echo "✅ Proxy started successfully (PID: $pid)"
+        echo "✅ Enhanced proxy started successfully (PID: $pid)"
         echo "📁 Socket: $SOCKET_PATH"
+        echo "🔗 Fluent-bit: $FLUENT_HOST:$FLUENT_PORT"
+        echo "🔍 Elasticsearch: $ES_HOST:$ES_PORT"
         echo "📋 Logs: $LOG_FILE"
         
         # Wait for socket to appear
@@ -157,20 +185,20 @@ start_proxy() {
             echo "⚠️  Socket not ready yet, check logs: tail -f $LOG_FILE"
         fi
     else
-        echo "❌ Failed to start proxy"
+        echo "❌ Failed to start enhanced proxy"
         rm -f "$PID_FILE"
         echo "Check logs: tail -f $LOG_FILE"
         return 1
     fi
 }
 
-# Stop the proxy daemon
+# Stop the enhanced proxy daemon
 stop_proxy() {
-    echo "🛑 Stopping TLS proxy daemon..."
+    echo "🛑 Stopping enhanced TLS proxy daemon..."
     
     local pid
     if pid=$(get_pid); then
-        echo "Stopping proxy (PID: $pid)"
+        echo "Stopping enhanced proxy (PID: $pid)"
         
         # Send SIGTERM first (graceful shutdown)
         kill -TERM "$pid"
@@ -194,9 +222,9 @@ stop_proxy() {
         rm -f "$PID_FILE"
         rm -f "$SOCKET_PATH"
         
-        echo "✅ Proxy stopped"
+        echo "✅ Enhanced proxy stopped"
     else
-        echo "⚠️  Proxy is not running"
+        echo "⚠️  Enhanced proxy is not running"
         
         # Clean up any stale socket
         if [[ -S "$SOCKET_PATH" ]]; then
@@ -206,10 +234,10 @@ stop_proxy() {
     fi
 }
 
-# Show proxy status
+# Show enhanced proxy status
 show_status() {
-    echo "📊 TLS Proxy Status"
-    echo "==================="
+    echo "📊 Enhanced TLS Proxy Status"
+    echo "============================"
     
     local pid
     if pid=$(get_pid); then
@@ -240,7 +268,7 @@ show_status() {
         echo ""
         echo "Testing socket connectivity..."
         if echo "PING" | timeout 2 nc -U "$SOCKET_PATH" 2>/dev/null | grep -q "PONG"; then
-            echo "Socket test: ✅ Responding"
+            echo "Socket test: ✅ Responding to pub/sub protocol"
         else
             echo "Socket test: ⚠️  Not responding (may be starting up)"
         fi
@@ -252,7 +280,8 @@ show_status() {
     
     echo ""
     echo "Configuration:"
-    echo "  Target: $PROXY_HOST:$PROXY_PORT"
+    echo "  Fluent-bit: $FLUENT_HOST:$FLUENT_PORT"
+    echo "  Elasticsearch: $ES_HOST:$ES_PORT"
     echo "  Pool size: $PROXY_POOL_SIZE"
     echo "  Debug: $PROXY_DEBUG"
     echo "  Log file: $LOG_FILE"
@@ -261,8 +290,8 @@ show_status() {
 # Show recent logs
 show_logs() {
     if [[ -f "$LOG_FILE" ]]; then
-        echo "📋 Recent proxy logs:"
-        echo "===================="
+        echo "📋 Recent enhanced proxy logs:"
+        echo "=============================="
         tail -20 "$LOG_FILE"
         echo ""
         echo "To follow logs: tail -f $LOG_FILE"
@@ -271,9 +300,9 @@ show_logs() {
     fi
 }
 
-# Restart proxy
+# Restart enhanced proxy
 restart_proxy() {
-    echo "🔄 Restarting TLS proxy daemon..."
+    echo "🔄 Restarting enhanced TLS proxy daemon..."
     stop_proxy
     sleep 2
     start_proxy
