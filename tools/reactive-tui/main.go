@@ -9,6 +9,7 @@ import (
 	"net"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -129,19 +130,19 @@ func (c *PubSubClient) Close() error {
 
 // Enhanced reactive TUI that correlates preexec/precmd events
 type EnhancedReactiveTUI struct {
-	client         *PubSubClient
-	commandStates  map[string]*CommandState // keyed by command_id
-	recentCommands []*CommandState          // ordered list for display
-	maxEvents      int
+	client            *PubSubClient
+	commandStates     map[string]*CommandState // keyed by command_id
+	recentCommands    []*CommandState          // ordered list for display
+	maxEvents         int
 	recentCorrelations map[string]time.Time   // track recent correlation completions to avoid duplicates
 }
 
 func NewEnhancedReactiveTUI(socketPath string, maxEvents int) *EnhancedReactiveTUI {
 	return &EnhancedReactiveTUI{
-		client:         NewPubSubClient(socketPath),
-		commandStates:  make(map[string]*CommandState),
-		recentCommands: make([]*CommandState, 0),
-		maxEvents:      maxEvents,
+		client:            NewPubSubClient(socketPath),
+		commandStates:     make(map[string]*CommandState),
+		recentCommands:    make([]*CommandState, 0),
+		maxEvents:         maxEvents,
 		recentCorrelations: make(map[string]time.Time),
 	}
 }
@@ -309,8 +310,8 @@ func (tui *EnhancedReactiveTUI) addCommandToRecent(commandState *CommandState) {
 }
 
 func (tui *EnhancedReactiveTUI) render() {
-	// Move cursor to top and clear screen content
-	fmt.Printf("\033[H")
+	// Clear screen and move cursor to top to prevent scrolling issues
+	fmt.Printf("\033[2J\033[H")
 	
 	fmt.Printf("🚀 Total Recall Enhanced TUI - %s\n", time.Now().Format("15:04:05"))
 	fmt.Printf("Recent commands (last %d) - Live correlation active:\n", len(tui.recentCommands))
@@ -321,8 +322,16 @@ func (tui *EnhancedReactiveTUI) render() {
 		return
 	}
 	
+	// Get terminal height to limit display and prevent scrolling
+	// Reserve 4 lines for header, so show at most (height - 4) commands
+	maxDisplayLines := tui.getTerminalHeight() - 4
+	if maxDisplayLines < 5 {
+		maxDisplayLines = 5 // minimum reasonable display
+	}
+	
 	// Display recent commands with status-based coloring (reverse order - most recent first)
-	for i := len(tui.recentCommands) - 1; i >= 0; i-- {
+	displayCount := 0
+	for i := len(tui.recentCommands) - 1; i >= 0 && displayCount < maxDisplayLines; i-- {
 		cmd := tui.recentCommands[i]
 		
 		duration := ""
@@ -362,8 +371,33 @@ func (tui *EnhancedReactiveTUI) render() {
 			displayLine += fmt.Sprintf(" [%d]", *cmd.ReturnCode)
 		}
 		
-		fmt.Printf("%s%s\033[0m\n", statusColor, displayLine)
+		// Print line and clear to end of line to avoid display corruption
+		fmt.Printf("%s%s\033[K\033[0m\n", statusColor, displayLine)
+		displayCount++
 	}
+}
+
+func (tui *EnhancedReactiveTUI) getTerminalHeight() int {
+	// Try to get terminal size
+	if height, err := getTerminalSize(); err == nil {
+		return height
+	}
+	// Fallback to reasonable default
+	return 25
+}
+
+// Simple function to get terminal size (height)
+func getTerminalSize() (int, error) {
+	// Try using tput command for height
+	cmd := exec.Command("tput", "lines")
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+	
+	var height int
+	fmt.Sscanf(string(output), "%d", &height)
+	return height, nil
 }
 
 func (tui *EnhancedReactiveTUI) getStatusIcon(cmd *CommandState) string {
