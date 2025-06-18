@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,6 +19,7 @@ type PreexecData struct {
 	CommandID      string    `json:"command_id"`
 	Command        string    `json:"command"`
 	Pwd            string    `json:"pwd"`
+	ShellPid       int       `json:"shellpid"`
 	StartTimestamp time.Time `json:"start_timestamp"`
 	Environment    []string  `json:"environment"`
 }
@@ -30,6 +33,7 @@ type PubSubEvent struct {
 	StartTimestamp *time.Time             `json:"start_timestamp,omitempty"`
 	EndTimestamp   *time.Time             `json:"end_timestamp,omitempty"`
 	ReturnCode     *int                   `json:"return_code,omitempty"`
+	ShellPid       int                   `json:"shellpid,omitempty"`
 	Environment    map[string]string      `json:"environment,omitempty"`
 	PubSubOnly     bool                   `json:"pubsub_only"` // Tells TLS proxy: don't send to fluent-bit
 }
@@ -41,32 +45,49 @@ func generateCommandID() string {
 }
 
 func main() {
-	// Check for special pub/sub modes
-	if len(os.Args) >= 2 {
-		switch os.Args[1] {
-		case "--send-preexec-event":
-			sendPreexecEvent()
-			return
-		case "--send-precmd-event":
-			sendPrecmdEvent()
-			return
-		}
+	// Define flags
+	var (
+		sendPreexecEvent = flag.Bool("send-preexec-event", false, "Send preexec event via pub/sub")
+		sendPrecmdEvent  = flag.Bool("send-precmd-event", false, "Send precmd event via pub/sub")
+		shellPid         = flag.Int("shell-pid", 0, "Shell PID (required for data collection mode)")
+		command          = flag.String("command", "", "Command to record (required for data collection mode)")
+	)
+	
+	flag.Parse()
+	
+	// Handle special pub/sub modes
+	if *sendPreexecEvent {
+		sendPreexecEventFunc()
+		return
+	}
+	
+	if *sendPrecmdEvent {
+		sendPrecmdEventFunc()
+		return
 	}
 	
 	// Original behavior: collect data and return base64 blob for shell storage
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <command>\n", os.Args[0])
+	if *command == "" {
+		fmt.Fprintf(os.Stderr, "Error: -command flag is required for data collection mode\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s -command <command> -shell-pid <pid>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "   or: %s -send-preexec-event\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "   or: %s -send-precmd-event\n", os.Args[0])
 		os.Exit(1)
 	}
 	
-	command := os.Args[1]
+	if *shellPid == 0 {
+		fmt.Fprintf(os.Stderr, "Error: -shell-pid flag is required for data collection mode\n")
+		os.Exit(1)
+	}
+	
 	commandID := generateCommandID()
 	
 	// Gather all data in one go
 	data := PreexecData{
 		CommandID:      commandID,
-		Command:        command,
+		Command:        *command,
 		Pwd:            getPwd(),
+		ShellPid:       *shellPid,
 		StartTimestamp: time.Now(),
 		Environment:    getFilteredEnvironment(),
 	}
@@ -83,7 +104,7 @@ func main() {
 	fmt.Print(encoded)
 }
 
-func sendPreexecEvent() {
+func sendPreexecEventFunc() {
 	// Read preexec data from environment variable
 	preexecData := os.Getenv("___PREEXEC_DATA")
 	if preexecData == "" {
@@ -123,6 +144,7 @@ func sendPreexecEvent() {
 		CommandID:      data.CommandID,
 		Command:        data.Command,
 		Pwd:            data.Pwd,
+		ShellPid:       data.ShellPid,
 		StartTimestamp: &data.StartTimestamp,
 		Environment:    env,
 		PubSubOnly:     true, // Don't send to fluent-bit
@@ -132,7 +154,7 @@ func sendPreexecEvent() {
 	sendToPubSub(event)
 }
 
-func sendPrecmdEvent() {
+func sendPrecmdEventFunc() {
 	// Get command ID and return code from environment
 	commandID := os.Getenv("___COMMAND_ID")
 	returnCodeStr := os.Getenv("___RETURN_CODE")
@@ -147,8 +169,11 @@ func sendPrecmdEvent() {
 		os.Exit(1)
 	}
 	
-	returnCode := 0
-	fmt.Sscanf(returnCodeStr, "%d", &returnCode)
+	returnCode, err := strconv.Atoi(returnCodeStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid return code '%s': %v\n", returnCodeStr, err)
+		os.Exit(1)
+	}
 	
 	endTime := time.Now()
 	

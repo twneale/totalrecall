@@ -21,6 +21,7 @@ type PreexecData struct {
     Pwd            string    `json:"pwd"`
     StartTimestamp time.Time `json:"start_timestamp"`
     Environment    []string  `json:"environment"`
+    ShellPid       int       `json:"shellpid"`
 }
 
 func parseTimestamp(t string) time.Time {
@@ -67,42 +68,6 @@ func parsePreexecData(encodedData string, config *EnvConfig) (*PreexecData, map[
     filteredEnv := config.FilterEnvironment(rawEnv)
     
     return &data, filteredEnv, nil
-}
-
-// Legacy function for backward compatibility
-func parseEnvironmentString(envData string, config *EnvConfig) (map[string]string, error) {
-    rawEnv := map[string]string{}
-    
-    if envData == "" {
-        return rawEnv, nil
-    }
-    
-    // Decode base64 encoded environment
-    decoded, err := base64.StdEncoding.DecodeString(envData)
-    if err != nil {
-        return rawEnv, fmt.Errorf("failed to decode environment data: %v", err)
-    }
-    
-    // Parse environment lines
-    lines := strings.Split(string(decoded), "\n")
-    for _, line := range lines {
-        if line == "" {
-            continue
-        }
-        
-        pair := strings.SplitN(line, "=", 2)
-        if len(pair) != 2 {
-            continue
-        }
-        
-        key := pair[0]
-        value := pair[1]
-        
-        rawEnv[key] = value
-    }
-    
-    // Apply configuration-based filtering
-    return config.FilterEnvironment(rawEnv), nil
 }
 
 func getHostname() string {
@@ -299,6 +264,7 @@ func main() {
     event["command"] = strings.TrimSpace(preexecData.Command)
     event["start_timestamp"] = preexecData.StartTimestamp
     event["pwd"] = preexecData.Pwd
+    event["shellpid"] = preexecData.ShellPid
     
     // Common processing for both formats
     returnCode, err := strconv.Atoi(*returnCodePtr)

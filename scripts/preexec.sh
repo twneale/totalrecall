@@ -5,7 +5,7 @@ function preexec() {
   export ___PREEXEC_PWD="$(pwd)"
   
   # Get preexec data (now includes command_id)
-  export ___PREEXEC_DATA="$($TOTAL_RECALL_ROOT/bin/preexec-hook "$1")"
+  export ___PREEXEC_DATA="$($TOTAL_RECALL_ROOT/bin/preexec-hook -command "$1" -shell-pid $$)"
   
   # Extract command_id from the preexec data for correlation
   # The data is base64 encoded JSON, so we need to decode and parse it
