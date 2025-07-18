@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -82,6 +83,10 @@ var (
 	filterIndicatorStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#F59E0B")).
 				Bold(true)
+
+	tableStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#7C3AED"))
 )
 
 // Key bindings
@@ -101,7 +106,7 @@ type keyMap struct {
 	ToggleHost key.Binding
 	ToggleShell key.Binding
 	TogglePwd  key.Binding
-	Quit       key.Binding
+	LoadMore   key.Binding
 	Escape     key.Binding
 }
 
@@ -113,9 +118,9 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown},
 		{k.Enter, k.Edit, k.Execute, k.Copy},
-		{k.Search, k.Fzf, k.Delete},
+		{k.Search, k.Fzf, k.Delete, k.LoadMore},
 		{k.ToggleHost, k.ToggleShell, k.TogglePwd},
-		{k.Help, k.Quit},
+		{k.Help, k.Escape, k.Quit},
 	}
 }
 
@@ -130,11 +135,11 @@ var keys = keyMap{
 	),
 	PageUp: key.NewBinding(
 		key.WithKeys("b", "ctrl+up"),
-		key.WithHelp("b/ctrl+↑", "page up"),
+		key.WithHelp("b", "page up"),
 	),
 	PageDown: key.NewBinding(
-		key.WithKeys("f", "ctrl+down"),
-		key.WithHelp("f/ctrl+↓", "page down"),
+		key.WithKeys("f", "ctrl+down", "space"),
+		key.WithHelp("f/space", "page down"),
 	),
 	Edit: key.NewBinding(
 		key.WithKeys("e"),
@@ -165,20 +170,24 @@ var keys = keyMap{
 		key.WithHelp("/", "search"),
 	),
 	Fzf: key.NewBinding(
-		key.WithKeys("f"),
-		key.WithHelp("f", "fuzzy find"),
+		key.WithKeys("ctrl+f"),
+		key.WithHelp("ctrl+f", "fuzzy find"),
 	),
 	ToggleHost: key.NewBinding(
 		key.WithKeys("h"),
-		key.WithHelp("h", "toggle host filter"),
+		key.WithHelp("h", "toggle host column"),
 	),
 	ToggleShell: key.NewBinding(
 		key.WithKeys("s"),
-		key.WithHelp("s", "toggle shell filter"),
+		key.WithHelp("s", "toggle shell column"),
 	),
 	TogglePwd: key.NewBinding(
 		key.WithKeys("p"),
-		key.WithHelp("p", "toggle pwd filter"),
+		key.WithHelp("p", "toggle pwd column"),
+	),
+	LoadMore: key.NewBinding(
+		key.WithKeys("m"),
+		key.WithHelp("m", "load more (debug)"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
@@ -214,21 +223,25 @@ type Model struct {
 	totalCount  int
 	hasMore     bool
 	
-	// Filters
+	// Filters and search
 	searchQuery string
-	hostFilter  bool
-	shellFilter bool
-	pwdFilter   bool
+	showHost    bool
+	showShell   bool
+	showPwd     bool
 	
-	// Current context
+	// Current context for filtering
 	currentPwd  string
 	currentHost string
 	parentPid   int
 	
 	// UI Components
 	searchInput textinput.Model
+	table       table.Model
 	viewport    viewport.Model
 	help        help.Model
+	
+	// Table configuration
+	tableColumns []table.Column
 	
 	// Confirmation state
 	confirmAction string
@@ -240,8 +253,8 @@ type Model struct {
 	// Loading state
 	loading bool
 	
-	// Cache for fast loading
-	useCache bool
+	// Scroll position
+	scrollOffset int
 }
 
 // Messages
@@ -249,6 +262,7 @@ type commandsLoadedMsg struct {
 	commands []Command
 	total    int
 	hasMore  bool
+	append   bool // Whether to append to existing commands or replace them
 }
 
 type commandDeletedMsg struct {
@@ -259,11 +273,42 @@ type errorMsg struct {
 	err error
 }
 
+type vimFinishedMsg struct{}
+
 // Initialize the model
-func initialModel(socketPath string, useCache bool) Model {
+func initialModel(socketPath string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Search commands..."
 	ti.CharLimit = 100
+
+	// Initialize table with basic columns
+	columns := []table.Column{
+		{Title: "Time", Width: 8},
+		{Title: "Command", Width: 50},
+		{Title: "Status", Width: 6},
+	}
+
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(20),
+	)
+
+	t.SetStyles(table.Styles{
+		Header: lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#7C3AED")).
+			BorderBottom(true).
+			Bold(true).
+			Padding(0, 1), // Add horizontal padding
+		Selected: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#7C3AED")).
+			Bold(true).
+			Padding(0, 1), // Add horizontal padding
+		Cell: lipgloss.NewStyle().
+			Padding(0, 1), // Add horizontal padding to all cells
+	})
 
 	vp := viewport.New(80, 20)
 	
@@ -277,17 +322,18 @@ func initialModel(socketPath string, useCache bool) Model {
 		commands:    []Command{},
 		cursor:      0,
 		searchInput: ti,
+		table:       t,
+		tableColumns: columns,
 		viewport:    vp,
 		help:        help.New(),
 		currentPwd:  pwd,
 		currentHost: hostname,
 		parentPid:   parentPid,
 		socketPath:  socketPath,
-		useCache:    useCache,
-		// Default filters
-		hostFilter: true,  // Show only current host by default
-		pwdFilter:  true,  // Show only current directory by default
-		shellFilter: false, // Show all shells by default
+		// Start with basic view
+		showHost:  false,
+		showShell: false,
+		showPwd:   false,
 	}
 }
 
@@ -305,17 +351,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 6 // Reserve space for header/footer
+		m.viewport.Width = msg.Width - 4
+		m.viewport.Height = msg.Height - 8 // Reserve space for header/footer
+		m.updateTableSize()
+		
+		// If we have commands, update table data
+		if len(m.commands) > 0 {
+			m.updateTableData()
+		}
 		
 	case commandsLoadedMsg:
-		m.commands = msg.commands
+		fmt.Fprintf(os.Stderr, "DEBUG: Loaded %d commands, total=%d, hasMore=%t, append=%t\n",
+			len(msg.commands), msg.total, msg.hasMore, msg.append)
+			
+		if msg.append {
+			// Append new commands to existing list
+			m.commands = append(m.commands, msg.commands...)
+		} else {
+			// Replace commands (new search/filter)
+			m.commands = msg.commands
+		}
+		
 		m.totalCount = msg.total
 		m.hasMore = msg.hasMore
 		m.loading = false
+		m.updateTableData()
+		
+		// Ensure cursor is valid
 		if len(m.commands) > 0 && m.cursor >= len(m.commands) {
 			m.cursor = len(m.commands) - 1
 		}
+		
+		fmt.Fprintf(os.Stderr, "DEBUG: After load - len(commands)=%d, hasMore=%t\n", 
+			len(m.commands), m.hasMore)
 		
 	case commandDeletedMsg:
 		// Remove deleted command from list
@@ -325,9 +393,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor >= len(m.commands) && len(m.commands) > 0 {
 					m.cursor = len(m.commands) - 1
 				}
+				m.updateTableData()
 				break
 			}
 		}
+		
+	case vimFinishedMsg:
+		// Vim finished, return to previous state
+		return m, nil
 		
 	case errorMsg:
 		// Handle errors (could show in status bar)
@@ -351,35 +424,160 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *Model) updateTableSize() {
+	// Calculate column widths based on window size and visible columns
+	availableWidth := m.width - 10 // Leave margin for borders
+	
+	columns := []table.Column{
+		{Title: "Time", Width: 8},
+	}
+	
+	remainingWidth := availableWidth - 8 // Time column
+	
+	// Add optional columns
+	if m.showHost {
+		columns = append(columns, table.Column{Title: "Host", Width: 15})
+		remainingWidth -= 15
+	}
+	
+	if m.showShell {
+		columns = append(columns, table.Column{Title: "PID", Width: 8})
+		remainingWidth -= 8
+	}
+	
+	if m.showPwd {
+		pwdWidth := 25
+		if remainingWidth < 50 { // If space is tight
+			pwdWidth = 20
+		}
+		columns = append(columns, table.Column{Title: "PWD", Width: pwdWidth})
+		remainingWidth -= pwdWidth
+	}
+	
+	// Command column gets remaining space (minimum 30)
+	cmdWidth := max(30, remainingWidth-10) // Leave space for status
+	columns = append(columns, table.Column{Title: "Command", Width: cmdWidth})
+	columns = append(columns, table.Column{Title: "Status", Width: 8})
+	
+	// Store columns and update table
+	m.tableColumns = columns
+	m.table.SetColumns(columns)
+	m.table.SetHeight(min(20, m.height-8))
+	
+	// Clear any existing rows to prevent column mismatch issues
+	m.table.SetRows([]table.Row{})
+}
+
+func (m *Model) updateTableData() {
+	rows := []table.Row{}
+	
+	for _, cmd := range m.commands {
+		row := table.Row{}
+		
+		// Time
+		row = append(row, cmd.StartTimestamp.Format("15:04:05"))
+		
+		// Optional columns
+		if m.showHost {
+			row = append(row, truncateString(cmd.Hostname, 14))
+		}
+		
+		if m.showShell {
+			row = append(row, strconv.Itoa(cmd.ShellPid))
+		}
+		
+		if m.showPwd {
+			// Show last 32 chars of PWD
+			pwd := cmd.Pwd
+			if len(pwd) > 32 {
+				pwd = "..." + pwd[len(pwd)-29:]
+			}
+			row = append(row, pwd)
+		}
+		
+		// Command (truncated) - always second to last column
+		command := cmd.Command
+		cmdWidth := 50 // Default width
+		
+		// Calculate command column width safely
+		if len(m.tableColumns) >= 2 {
+			// Command column is always second to last
+			cmdColumnIndex := len(m.tableColumns) - 2
+			if cmdColumnIndex >= 0 && cmdColumnIndex < len(m.tableColumns) {
+				cmdWidth = m.tableColumns[cmdColumnIndex].Width
+			}
+		}
+		
+		if len(command) > cmdWidth {
+			command = command[:cmdWidth-3] + "..."
+		}
+		row = append(row, command)
+		
+		// Status - always last column
+		status := "✅"
+		if cmd.ReturnCode != 0 {
+			status = "❌"
+		}
+		row = append(row, status)
+		
+		rows = append(rows, row)
+	}
+	
+	m.table.SetRows(rows)
+}
+
 func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
 		
 	case key.Matches(msg, keys.Up):
-		if m.cursor > 0 {
-			m.cursor--
-		}
+		m.table, cmd = m.table.Update(msg)
+		m.cursor = m.table.Cursor()
 		
 	case key.Matches(msg, keys.Down):
-		if m.cursor < len(m.commands)-1 {
-			m.cursor++
-		} else if m.hasMore {
-			// Load more commands
-			return m, m.loadCommands(len(m.commands), 50)
+		m.table, cmd = m.table.Update(msg)
+		m.cursor = m.table.Cursor()
+		
+		// Debug logging - remove this later
+		fmt.Fprintf(os.Stderr, "DEBUG: cursor=%d, len(commands)=%d, hasMore=%t, loading=%t\n", 
+			m.cursor, len(m.commands), m.hasMore, m.loading)
+		
+		// More aggressive infinite scroll check
+		isNearBottom := m.cursor >= len(m.commands)-10
+		isAtBottom := m.cursor >= len(m.commands)-1
+		
+		if (isNearBottom || isAtBottom) && m.hasMore && !m.loading && len(m.commands) > 0 {
+			fmt.Fprintf(os.Stderr, "DEBUG: Triggering load more commands! (cursor=%d, near=%t, at=%t)\n", 
+				m.cursor, isNearBottom, isAtBottom)
+			m.loading = true
+			return m, tea.Batch(cmd, m.loadMoreCommands())
 		}
 		
 	case key.Matches(msg, keys.PageUp):
-		m.cursor = max(0, m.cursor-10)
+		for i := 0; i < 10; i++ {
+			m.table, _ = m.table.Update(tea.KeyMsg{Type: tea.KeyUp})
+		}
+		m.cursor = m.table.Cursor()
 		
 	case key.Matches(msg, keys.PageDown):
-		m.cursor = min(len(m.commands)-1, m.cursor+10)
-		if m.cursor == len(m.commands)-1 && m.hasMore {
-			return m, m.loadCommands(len(m.commands), 50)
+		for i := 0; i < 10; i++ {
+			m.table, _ = m.table.Update(tea.KeyMsg{Type: tea.KeyDown})
+		}
+		m.cursor = m.table.Cursor()
+		
+		// Check if we need to load more data after page down
+		if m.cursor >= len(m.commands)-10 && m.hasMore && !m.loading {
+			m.loading = true
+			return m, m.loadMoreCommands()
 		}
 		
 	case key.Matches(msg, keys.Enter):
-		m.state = ViewDetail
+		if len(m.commands) > 0 {
+			m.state = ViewDetail
+		}
 		
 	case key.Matches(msg, keys.Search):
 		m.state = ViewSearch
@@ -415,20 +613,42 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Fzf):
 		return m, m.runFzf()
 		
+	case key.Matches(msg, keys.LoadMore):
+		// Manual trigger for debugging infinite scroll
+		if m.hasMore && !m.loading {
+			fmt.Fprintf(os.Stderr, "DEBUG: Manual load more triggered!\n")
+			m.loading = true
+			return m, m.loadMoreCommands()
+		} else {
+			fmt.Fprintf(os.Stderr, "DEBUG: Manual load more - hasMore=%t, loading=%t\n", m.hasMore, m.loading)
+		}
+		
 	case key.Matches(msg, keys.ToggleHost):
-		m.hostFilter = !m.hostFilter
-		return m, m.loadCommands(0, 50)
+		m.showHost = !m.showHost
+		m.updateTableSize()
+		m.updateTableData()
+		// Reset cursor to prevent index issues
+		m.table.SetCursor(0)
+		m.cursor = 0
 		
 	case key.Matches(msg, keys.ToggleShell):
-		m.shellFilter = !m.shellFilter
-		return m, m.loadCommands(0, 50)
+		m.showShell = !m.showShell
+		m.updateTableSize()
+		m.updateTableData()
+		// Reset cursor to prevent index issues
+		m.table.SetCursor(0)
+		m.cursor = 0
 		
 	case key.Matches(msg, keys.TogglePwd):
-		m.pwdFilter = !m.pwdFilter
-		return m, m.loadCommands(0, 50)
+		m.showPwd = !m.showPwd
+		m.updateTableSize()
+		m.updateTableData()
+		// Reset cursor to prevent index issues
+		m.table.SetCursor(0)
+		m.cursor = 0
 	}
 	
-	return m, nil
+	return m, cmd
 }
 
 func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -476,6 +696,7 @@ func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchQuery = m.searchInput.Value()
 		m.state = ViewList
 		m.searchInput.Blur()
+		// Trigger search by reloading commands
 		return m, m.loadCommands(0, 50)
 	}
 	
@@ -529,7 +750,7 @@ func (m Model) View() string {
 func (m Model) viewList() string {
 	var s strings.Builder
 	
-	// Header
+	// Header - always visible
 	title := "Total Recall Command History"
 	filters := m.getFilterStatus()
 	if filters != "" {
@@ -537,41 +758,54 @@ func (m Model) viewList() string {
 	}
 	
 	s.WriteString(titleStyle.Render(title))
-	s.WriteString("\n\n")
+	s.WriteString("\n")
 	
-	// Search bar
+	// Search indicator
 	if m.searchQuery != "" {
 		s.WriteString(fmt.Sprintf("Search: %s\n", searchStyle.Render(m.searchQuery)))
 	}
 	
-	// Commands list
-	if len(m.commands) == 0 {
-		s.WriteString(mutedStyle.Render("No commands found. Try adjusting your filters or search query."))
-	} else {
-		for i, cmd := range m.commands {
-			line := m.formatCommandLine(cmd, i == m.cursor)
-			s.WriteString(line)
-			s.WriteString("\n")
-		}
+	// Loading indicator for pagination
+	if m.loading {
+		s.WriteString(warningStyle.Render("Loading more commands...") + "\n")
 	}
 	
-	// Footer
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render(fmt.Sprintf(
-		"Showing %d/%d commands • Press ? for help • q to quit",
-		len(m.commands), m.totalCount,
-	)))
+	
+	// Table view
+	if len(m.commands) == 0 {
+		s.WriteString(mutedStyle.Render("No commands found. Try adjusting your search query."))
+	} else {
+		s.WriteString(tableStyle.Render(m.table.View()))
+	}
+	
+	// Footer - always visible
+	s.WriteString("\n\n")
+	
+	footerText := fmt.Sprintf("Showing %d/%d commands", len(m.commands), m.totalCount)
+	if m.loading {
+		footerText += " • Loading more..."
+	}
+	if m.hasMore {
+		footerText += " • Scroll down for more"
+	}
+	footerText += " • Press ? for help • q to quit"
+	
+	s.WriteString(helpStyle.Render(footerText))
 	
 	return s.String()
 }
 
 func (m Model) viewDetail() string {
+	// Clear screen completely
+	var s strings.Builder
+	s.WriteString("\033[2J\033[H") // Clear screen and go to top
+	
 	if len(m.commands) == 0 {
 		return "No command selected"
 	}
 	
 	cmd := m.commands[m.cursor]
-	var s strings.Builder
 	
 	s.WriteString(titleStyle.Render("Command Details"))
 	s.WriteString("\n\n")
@@ -617,10 +851,11 @@ func (m Model) viewDetail() string {
 func (m Model) viewSearch() string {
 	var s strings.Builder
 	
+	s.WriteString("\033[2J\033[H") // Clear screen
 	s.WriteString(titleStyle.Render("Search Commands"))
 	s.WriteString("\n\n")
 	s.WriteString("Enter search query:\n")
-	s.WriteString(m.searchInput.View())
+	s.WriteString(searchStyle.Render(m.searchInput.View()))
 	s.WriteString("\n\n")
 	s.WriteString(helpStyle.Render("Press Enter to search, Esc to cancel"))
 	
@@ -630,10 +865,34 @@ func (m Model) viewSearch() string {
 func (m Model) viewHelp() string {
 	var s strings.Builder
 	
+	s.WriteString("\033[2J\033[H") // Clear screen
 	s.WriteString(titleStyle.Render("Total Recall Command History - Help"))
 	s.WriteString("\n\n")
 	
-	s.WriteString(m.help.View(keys))
+	// Show full help with all keybindings
+	s.WriteString("Navigation:\n")
+	s.WriteString("  j/k or ↑/↓     Move up/down\n")
+	s.WriteString("  b/f           Page up/down\n")
+	s.WriteString("  enter/l       View details\n")
+	s.WriteString("\n")
+	s.WriteString("Actions:\n")
+	s.WriteString("  e             Edit command in vim\n")
+	s.WriteString("  c             Copy command to clipboard\n")
+	s.WriteString("  x             Execute command\n")
+	s.WriteString("  d             Delete command\n")
+	s.WriteString("\n")
+	s.WriteString("Search & Filter:\n")
+	s.WriteString("  /             Search commands\n")
+	s.WriteString("  ctrl+f        Fuzzy find (if fzf available)\n")
+	s.WriteString("  h             Toggle host column\n")
+	s.WriteString("  s             Toggle shell PID column\n")
+	s.WriteString("  p             Toggle PWD column\n")
+	s.WriteString("\n")
+	s.WriteString("Other:\n")
+	s.WriteString("  ?             This help\n")
+	s.WriteString("  m             Load more commands (debug)\n")
+	s.WriteString("  esc           Back/Cancel\n")
+	s.WriteString("  q             Quit\n")
 	
 	s.WriteString("\n\n")
 	s.WriteString(helpStyle.Render("Press ? or Esc to close help"))
@@ -643,6 +902,8 @@ func (m Model) viewHelp() string {
 
 func (m Model) viewConfirm() string {
 	var s strings.Builder
+	
+	s.WriteString("\033[2J\033[H") // Clear screen
 	
 	action := "Action"
 	if m.confirmAction == "delete" {
@@ -668,60 +929,16 @@ func (m Model) viewConfirm() string {
 	return s.String()
 }
 
-func (m Model) formatCommandLine(cmd Command, focused bool) string {
-	// Format timestamp
-	timeStr := cmd.StartTimestamp.Format("15:04:05")
-	
-	// Format command (truncate if too long)
-	cmdStr := cmd.Command
-	maxCmdLen := 80
-	if len(cmdStr) > maxCmdLen {
-		cmdStr = cmdStr[:maxCmdLen-3] + "..."
-	}
-	
-	// Choose style based on return code
-	var cmdStyle lipgloss.Style
-	switch cmd.ReturnCode {
-	case 0:
-		cmdStyle = successStyle
-	case 1:
-		cmdStyle = errorStyle
-	case 2:
-		cmdStyle = warningStyle
-	default:
-		if cmd.ReturnCode > 128 {
-			cmdStyle = errorStyle.Copy().Foreground(lipgloss.Color("#DC2626")) // Darker red for signals
-		} else {
-			cmdStyle = mutedStyle
-		}
-	}
-	
-	// Format the line
-	line := fmt.Sprintf("%s %s", 
-		mutedStyle.Render(timeStr),
-		cmdStyle.Render(cmdStr),
-	)
-	
-	// Add focus highlight
-	if focused {
-		line = focusedStyle.Render("► " + line)
-	} else {
-		line = "  " + line
-	}
-	
-	return line
-}
-
 func (m Model) getFilterStatus() string {
 	var filters []string
 	
-	if m.hostFilter {
+	if m.showHost {
 		filters = append(filters, "H")
 	}
-	if m.shellFilter {
+	if m.showShell {
 		filters = append(filters, "S")
 	}
-	if m.pwdFilter {
+	if m.showPwd {
 		filters = append(filters, "P")
 	}
 	
@@ -734,16 +951,25 @@ func (m Model) loadCommands(offset, limit int) tea.Cmd {
 	return func() tea.Msg {
 		query := m.buildElasticsearchQuery(offset, limit)
 		
-		// Try cache first if this is the initial load
-		if offset == 0 && m.useCache {
-			if response, err := m.queryCache(query); err == nil {
-				return commandsLoadedMsg{
-					commands: response.Commands,
-					total:    response.Total,
-					hasMore:  response.HasMore,
-				}
+		// Query elasticsearch via socket
+		if response, err := m.queryElasticsearch(query); err == nil {
+			return commandsLoadedMsg{
+				commands: response.Commands,
+				total:    response.Total,
+				hasMore:  response.HasMore,
+				append:   false, // Replace existing commands
 			}
+		} else {
+			return errorMsg{err}
 		}
+	}
+}
+
+func (m Model) loadMoreCommands() tea.Cmd {
+	return func() tea.Msg {
+		offset := len(m.commands)
+		limit := 50
+		query := m.buildElasticsearchQuery(offset, limit)
 		
 		// Query elasticsearch via socket
 		if response, err := m.queryElasticsearch(query); err == nil {
@@ -751,6 +977,7 @@ func (m Model) loadCommands(offset, limit int) tea.Cmd {
 				commands: response.Commands,
 				total:    response.Total,
 				hasMore:  response.HasMore,
+				append:   true, // Append to existing commands
 			}
 		} else {
 			return errorMsg{err}
@@ -770,32 +997,18 @@ func (m Model) buildElasticsearchQuery(offset, limit int) map[string]interface{}
 	// Build filter conditions
 	var filters []map[string]interface{}
 	
-	// Host filter
-	if m.hostFilter {
-		filters = append(filters, map[string]interface{}{
-			"term": map[string]interface{}{
-				"hostname.keyword": m.currentHost,
-			},
-		})
-	}
+	// Always filter by current host and pwd (this is the main purpose)
+	filters = append(filters, map[string]interface{}{
+		"term": map[string]interface{}{
+			"hostname.keyword": m.currentHost,
+		},
+	})
 	
-	// PWD filter
-	if m.pwdFilter {
-		filters = append(filters, map[string]interface{}{
-			"term": map[string]interface{}{
-				"pwd.keyword": m.currentPwd,
-			},
-		})
-	}
-	
-	// Shell filter
-	if m.shellFilter {
-		filters = append(filters, map[string]interface{}{
-			"term": map[string]interface{}{
-				"shellpid": m.parentPid,
-			},
-		})
-	}
+	filters = append(filters, map[string]interface{}{
+		"term": map[string]interface{}{
+			"pwd.keyword": m.currentPwd,
+		},
+	})
 	
 	// Search query
 	var must []map[string]interface{}
@@ -826,32 +1039,6 @@ func (m Model) buildElasticsearchQuery(offset, limit int) map[string]interface{}
 	return query
 }
 
-func (m Model) queryCache(query map[string]interface{}) (*QueryResponse, error) {
-	// Connect to proxy and request cached results
-	conn, err := net.Dial("unix", m.socketPath)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	
-	request := map[string]interface{}{
-		"action": "get_cache",
-		"query":  query,
-	}
-	
-	data, _ := json.Marshal(request)
-	conn.Write(append(data, '\n'))
-	
-	// Read response
-	var response QueryResponse
-	decoder := json.NewDecoder(conn)
-	if err := decoder.Decode(&response); err != nil {
-		return nil, err
-	}
-	
-	return &response, nil
-}
-
 func (m Model) queryElasticsearch(query map[string]interface{}) (*QueryResponse, error) {
 	// Connect to proxy and make elasticsearch query
 	conn, err := net.Dial("unix", m.socketPath)
@@ -879,47 +1066,46 @@ func (m Model) queryElasticsearch(query map[string]interface{}) (*QueryResponse,
 }
 
 func (m Model) editCommand(cmd Command) tea.Cmd {
-	return func() tea.Msg {
-		// Create temporary file
-		tmpFile, err := os.CreateTemp("", "totalrecall-edit-*.sh")
-		if err != nil {
-			return errorMsg{err}
-		}
+	// Create temporary file
+	tmpFile, err := os.CreateTemp("", "totalrecall-edit-*.sh")
+	if err != nil {
+		return func() tea.Msg { return errorMsg{err} }
+	}
+	
+	// Write command to file
+	tmpFile.WriteString(cmd.Command)
+	tmpFile.Close()
+	
+	// Create vim command
+	vimCmd := exec.Command("vim", tmpFile.Name())
+	
+	// Use tea.ExecProcess to run vim
+	return tea.ExecProcess(vimCmd, func(err error) tea.Msg {
 		defer os.Remove(tmpFile.Name())
 		
-		// Write command to file
-		tmpFile.WriteString(cmd.Command)
-		tmpFile.Close()
-		
-		// Open in vim
-		vimCmd := exec.Command("vim", tmpFile.Name())
-		vimCmd.Stdin = os.Stdin
-		vimCmd.Stdout = os.Stdout
-		vimCmd.Stderr = os.Stderr
-		
-		if err := vimCmd.Run(); err != nil {
+		if err != nil {
 			return errorMsg{err}
 		}
 		
 		// Read edited content
-		content, err := os.ReadFile(tmpFile.Name())
-		if err != nil {
-			return errorMsg{err}
+		content, readErr := os.ReadFile(tmpFile.Name())
+		if readErr != nil {
+			return errorMsg{readErr}
 		}
 		
-		// Put edited command on clipboard and prepare for execution
+		// Put edited command on clipboard
 		editedCmd := strings.TrimSpace(string(content))
-		if err := m.setClipboard(editedCmd); err != nil {
-			return errorMsg{err}
+		if clipErr := setClipboard(editedCmd); clipErr != nil {
+			return errorMsg{clipErr}
 		}
 		
-		return nil // Command is now in clipboard
-	}
+		return vimFinishedMsg{}
+	})
 }
 
 func (m Model) copyCommand(cmd Command) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.setClipboard(cmd.Command); err != nil {
+		if err := setClipboard(cmd.Command); err != nil {
 			return errorMsg{err}
 		}
 		return nil
@@ -948,106 +1134,94 @@ func (m Model) deleteCommand(cmd Command) tea.Cmd {
 }
 
 func (m Model) executeCommand(cmd Command) tea.Cmd {
-	return func() tea.Msg {
-		// Build execution script
-		var script strings.Builder
-		
-		// Change to the original directory
-		script.WriteString(fmt.Sprintf("cd %s\n", cmd.Pwd))
-		
-		// Set environment variables
-		for key, value := range cmd.Environment {
-			// Skip internal variables and hashed values
-			if strings.HasPrefix(key, "___") || strings.HasPrefix(value, "h8_") {
-				continue
-			}
-			script.WriteString(fmt.Sprintf("export %s=%s\n", key, value))
+	// Build execution script
+	var script strings.Builder
+	
+	// Change to the original directory
+	script.WriteString(fmt.Sprintf("cd %s\n", cmd.Pwd))
+	
+	// Set environment variables
+	for key, value := range cmd.Environment {
+		// Skip internal variables and hashed values
+		if strings.HasPrefix(key, "___") || strings.HasPrefix(value, "h8_") {
+			continue
 		}
+		script.WriteString(fmt.Sprintf("export %s=%s\n", key, value))
+	}
+	
+	// Add the command
+	script.WriteString(cmd.Command)
+	script.WriteString("\n")
+	
+	// Create temporary script file
+	tmpFile, err := os.CreateTemp("", "totalrecall-exec-*.sh")
+	if err != nil {
+		return func() tea.Msg { return errorMsg{err} }
+	}
+	
+	tmpFile.WriteString(script.String())
+	tmpFile.Close()
+	
+	// Make executable
+	os.Chmod(tmpFile.Name(), 0755)
+	
+	// Execute in a new shell
+	execCmd := exec.Command("bash", tmpFile.Name())
+	
+	return tea.ExecProcess(execCmd, func(err error) tea.Msg {
+		defer os.Remove(tmpFile.Name())
 		
-		// Add the command
-		script.WriteString(cmd.Command)
-		script.WriteString("\n")
-		
-		// Create temporary script file
-		tmpFile, err := os.CreateTemp("", "totalrecall-exec-*.sh")
 		if err != nil {
 			return errorMsg{err}
 		}
-		defer os.Remove(tmpFile.Name())
 		
-		tmpFile.WriteString(script.String())
-		tmpFile.Close()
-		
-		// Make executable
-		os.Chmod(tmpFile.Name(), 0755)
-		
-		// Execute in a new shell
-		execCmd := exec.Command("bash", tmpFile.Name())
-		execCmd.Stdin = os.Stdin
-		execCmd.Stdout = os.Stdout
-		execCmd.Stderr = os.Stderr
-		
-		if err := execCmd.Run(); err != nil {
-			return errorMsg{err}
-		}
-		
-		return nil
-	}
+		return vimFinishedMsg{}
+	})
 }
 
 func (m Model) runFzf() tea.Cmd {
-	return func() tea.Msg {
-		// Check if fzf is available
-		if _, err := exec.LookPath("fzf"); err != nil {
-			return errorMsg{fmt.Errorf("fzf not found in PATH")}
-		}
+	// Check if fzf is available
+	if _, err := exec.LookPath("fzf"); err != nil {
+		return func() tea.Msg { return errorMsg{fmt.Errorf("fzf not found in PATH")} }
+	}
+	
+	// Create input for fzf
+	var lines []string
+	for i, cmd := range m.commands {
+		timeStr := cmd.StartTimestamp.Format("15:04:05")
+		line := fmt.Sprintf("%d: %s %s", i, timeStr, cmd.Command)
+		lines = append(lines, line)
+	}
+	
+	if len(lines) == 0 {
+		return func() tea.Msg { return errorMsg{fmt.Errorf("no commands available")} }
+	}
+	
+	// Create a temporary file with the lines for fzf
+	tmpFile, err := os.CreateTemp("", "totalrecall-fzf-*.txt")
+	if err != nil {
+		return func() tea.Msg { return errorMsg{err} }
+	}
+	
+	tmpFile.WriteString(strings.Join(lines, "\n"))
+	tmpFile.Close()
+	
+	// Run fzf
+	fzfCmd := exec.Command("fzf", "--reverse", "--height=50%")
+	fzfCmd.Stdin, _ = os.Open(tmpFile.Name())
+	
+	return tea.ExecProcess(fzfCmd, func(err error) tea.Msg {
+		defer os.Remove(tmpFile.Name())
 		
-		// Create input for fzf
-		var lines []string
-		for i, cmd := range m.commands {
-			timeStr := cmd.StartTimestamp.Format("15:04:05")
-			line := fmt.Sprintf("%d: %s %s", i, timeStr, cmd.Command)
-			lines = append(lines, line)
-		}
-		
-		if len(lines) == 0 {
-			return errorMsg{fmt.Errorf("no commands available")}
-		}
-		
-		// Run fzf
-		fzfCmd := exec.Command("fzf", "--reverse", "--height=50%")
-		fzfCmd.Stdin = strings.NewReader(strings.Join(lines, "\n"))
-		fzfCmd.Stderr = os.Stderr
-		
-		output, err := fzfCmd.Output()
 		if err != nil {
 			return errorMsg{err}
 		}
 		
-		// Parse selection
-		selection := strings.TrimSpace(string(output))
-		if selection == "" {
-			return nil
-		}
-		
-		// Extract index
-		parts := strings.SplitN(selection, ":", 2)
-		if len(parts) < 2 {
-			return nil
-		}
-		
-		index, err := strconv.Atoi(parts[0])
-		if err != nil || index < 0 || index >= len(m.commands) {
-			return nil
-		}
-		
-		// This would need to be handled by returning a special message
-		// For now, we'll just return nil
-		return nil
-	}
+		return vimFinishedMsg{}
+	})
 }
 
-func (m Model) setClipboard(text string) error {
+func setClipboard(text string) error {
 	// Try different clipboard commands
 	commands := [][]string{
 		{"pbcopy"},                              // macOS
@@ -1068,6 +1242,13 @@ func (m Model) setClipboard(text string) error {
 	return fmt.Errorf("no clipboard command available")
 }
 
+// TUIRequest represents a request from the TUI
+type TUIRequest struct {
+	Action    string                 `json:"action"`
+	Query     map[string]interface{} `json:"query,omitempty"`
+	CommandID string                 `json:"command_id,omitempty"`
+}
+
 // Utility functions
 func max(a, b int) int {
 	if a > b {
@@ -1083,16 +1264,22 @@ func min(a, b int) int {
 	return b
 }
 
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
 func main() {
 	socketPath := "/tmp/totalrecall-proxy.sock"
-	useCache := true
 	
 	// Parse command line arguments
 	if len(os.Args) > 1 {
 		socketPath = os.Args[1]
 	}
 	
-	model := initialModel(socketPath, useCache)
+	model := initialModel(socketPath)
 	
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	
